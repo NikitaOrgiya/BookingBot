@@ -71,16 +71,43 @@ Telegram-бот для онлайн-записи клиентов с админ�
 
 Подробности — в разделе "Этап 2: ядро бронирования" ниже.
 
-**Намеренно не реализовано пока:** Telegram-бот, административная панель,
-авторизация, напоминания. Эти части будут добавлены на следующих этапах
-согласно техническому заданию.
+**Этап 3: Telegram-бот и клиентский сценарий записи** — готово.
+
+- grammY-бот (`lib/telegram/`) с раздельными модулями (кодек `callback_data`,
+  клавиатуры, экраны, форматирование, репозитории, обработчики команд/колбэков)
+  — без единого монолитного файла;
+- полный клиентский сценарий: `/start` → главное меню → выбор услуги → дата →
+  время → подтверждение → бронь → подтверждение брони; плюс просмотр своих
+  записей, отмена своей записи, `/cancel` текущего сценария, безопасное
+  восстановление после устаревшей кнопки;
+- состояние диалога — только в таблице `booking_sessions` (никакой
+  in-memory сессии — serverless), явная конечная модель состояний;
+- идемпотентность Telegram-обновлений через `processed_telegram_updates` по
+  модели atomic claim/release (новая миграция
+  `20260716140000_processed_telegram_updates_claim_retry.sql`);
+- вебхук (`app/api/telegram/webhook/route.ts`) проверяет
+  `X-Telegram-Bot-Api-Secret-Token` константным по времени сравнением
+  (встроено в grammY) и никогда не логирует полный Telegram update;
+- `TELEGRAM_WEBHOOK_SECRET` теперь валидируется по ограничениям самого
+  Telegram Bot API (1–256 символов, `A-Za-z0-9_-`); `BUSINESS_TIMEZONE`
+  убран из `lib/env.ts` — часовой пояс всегда читается из
+  `business_settings.timezone`, а не дублируется переменной окружения;
+- unit- и интеграционные тесты (кодек колбэков, форматирование в часовом
+  поясе бизнеса, переходы `booking_sessions`, безопасность вебхука,
+  идемпотентность параллельных обновлений, изоляция записей по владельцу).
+
+Подробности — в разделе "Этап 3: Telegram-бот" ниже.
+
+**Намеренно не реализовано пока:** административная панель, авторизация,
+напоминания. Эти части будут добавлены на следующих этапах согласно
+техническому заданию.
 
 ## Технологический стек
 
 - Next.js (App Router) + React + TypeScript (strict)
 - Tailwind CSS
 - Supabase: PostgreSQL, Auth, Row Level Security
-- Telegram Bot API (grammY) — будет подключено на этапе 3
+- Telegram Bot API (grammY)
 - Zod — валидация всех внешних данных
 - Vitest — unit-тесты
 - Playwright — E2E-тесты (появятся позже)
@@ -92,7 +119,7 @@ Telegram-бот для онлайн-записи клиентов с админ�
 app/                    Next.js App Router: страницы и API-роуты
   login/                страница входа администратора (заглушка)
   admin/                административная панель (заглушка)
-  api/telegram/webhook/  Telegram webhook (заглушка)
+  api/telegram/webhook/  Telegram webhook (Route Handler, POST-only)
   api/cron/reminders/    endpoint напоминаний (заглушка)
 
 components/
@@ -101,14 +128,20 @@ components/
 
 lib/
   booking/              логика доступности и бронирования
-  telegram/              бот, клавиатуры, обработчики
+  telegram/              бот: bot.ts, context.ts, webhook-handler.ts,
+                          callback-data.ts, keyboards.ts, messages.ts,
+                          formatters.ts, screens.ts, respond.ts,
+                          user-profile.ts, idempotency.ts,
+                          handlers/ (commands.ts, callbacks.ts),
+                          repositories/ (telegram-users, booking-sessions,
+                          services, appointments, business-settings)
   supabase/              клиенты Supabase
   auth/                  проверка прав администратора
   env.ts                 Zod-валидация переменных окружения
 
 scripts/
   test-sql.sh            прогон SQL/pgTAP-тестов на локальной базе
-                          (сюда же лягут скрипты настройки Telegram webhook)
+  telegram/               ручное управление Telegram-ботом (webhook, команды)
 
 supabase/
   migrations/            SQL-миграции
@@ -155,12 +188,19 @@ anon/service_role:
 ключа. Серверный клиент не хранит сессию и не обновляет токены
 (`persistSession: false`, `autoRefreshToken: false`).
 
-`BUSINESS_TIMEZONE` проверяется не просто как непустая строка, а как
-настоящий IANA-идентификатор часового пояса — значение должно входить в
-`Intl.supportedValuesOf("timeZone")`. Опечатки (`Europe/Moskow`), смещения
-(`UTC+3`, `GMT+3`) и сокращённые названия городов (`Moscow`) отклоняются
-ещё на этапе проверки окружения, а не приводят к тихим ошибкам при расчёте
-расписания.
+Начиная с Этапа 3 переменной `BUSINESS_TIMEZONE` в проекте больше нет:
+единственный источник часового пояса — `business_settings.timezone` в базе
+данных (уже проверенный `CHECK`-ограничением Этапа 1 как настоящий
+IANA-идентификатор). Дублировать это значение отдельной переменной
+окружения было избыточно и создавало риск рассинхронизации между env и
+БД — `lib/telegram/repositories/business-settings.ts` читает его напрямую
+оттуда при каждом обращении.
+
+`TELEGRAM_WEBHOOK_SECRET` проверяется по собственным ограничениям Telegram
+Bot API: 1–256 символов, только `A-Z`, `a-z`, `0-9`, `_` и `-`
+(см. `setWebhook`/`secret_token` в документации Telegram). Значение
+сверяется с заголовком `X-Telegram-Bot-Api-Secret-Token` константным по
+времени сравнением — подробности в разделе "Этап 3: Telegram-бот".
 
 `TEST_DATABASE_URL` нужен только для `npm run test:integration` (реальный
 конкурентный тест) — это не переменная приложения и в `.env.example` она
@@ -545,6 +585,233 @@ constraint на `appointments`: пересекающаяся вставка па
 проекта только после `supabase db diff`/dry-run (в этом репозитории
 `supabase db push` не выполнялся — см. финальные замечания ниже).
 
+## Этап 3: Telegram-бот
+
+Бот построен на [grammY](https://grammy.dev/), в отдельных модулях
+`lib/telegram/` — без единого монолитного файла:
+
+```text
+lib/telegram/
+  bot.ts                  сборка Bot<BotContext>, порядок middleware
+  context.ts              расширение Context: telegramUserId/telegramUserRowId
+  webhook-handler.ts       Request → Response поверх webhookCallback("std/http")
+  callback-data.ts         кодек callback_data инлайн-кнопок (кодирование/decode)
+  keyboards.ts             InlineKeyboard для каждого экрана
+  messages.ts              русскоязычные тексты + доменная ошибка → сообщение
+  formatters.ts             дата/время/цена/длительность в часовом поясе бизнеса
+  screens.ts               чистые (текст, клавиатура) — без обращений к БД
+  respond.ts               replyWithScreen (команды) / editWithScreen (колбэки)
+  user-profile.ts          Telegram User → безопасный профиль (id как строка)
+  idempotency.ts           claim/release для processed_telegram_updates
+  handlers/
+    commands.ts             /start /book /mybookings /help /cancel
+    callbacks.ts             диспетчер callback_query, все переходы сценария
+  repositories/
+    telegram-users.ts        upsert профиля клиента
+    booking-sessions.ts      чтение/запись/очистка booking_sessions
+    services.ts               список услуг + повторная проверка по id
+    appointments.ts           свои записи (владение проверяется в WHERE)
+    business-settings.ts     timezone/booking_horizon_days из БД
+```
+
+### Клиентский сценарий
+
+`/start` показывает главное меню («Записаться», «Мои записи», «Помощь»).
+Сценарий записи: выбор услуги (только активные, в порядке `sort_order`) →
+выбор даты (в часовом поясе бизнеса, без прошедших дат, в пределах
+`booking_horizon_days`, с пагинацией) → выбор времени (только через
+`getAvailableSlots`) → экран подтверждения (услуга/дата/время/
+длительность/цена/часовой пояс, кнопки «Подтвердить»/«Назад»/«Отменить») →
+`reserveAppointment` → подтверждение или понятная ошибка. Кнопка «Назад»
+работает на каждом шаге; `/cancel` в любой момент прерывает текущий
+незавершённый сценарий (это **не** отмена уже созданной записи — для неё
+отдельная кнопка «Отменить запись» в «Мои записи»). Устаревшая/подделанная
+кнопка (другой сценарий, истёкшая сессия, чужой параметр) никогда не
+обрабатывается вслепую — бот сбрасывает сессию и просит начать заново.
+
+Все мутации проходят только через существующие обёртки Этапа 2 —
+`getAvailableSlots`, `reserveAppointment`, `cancelAppointmentByClient`;
+Telegram-код никогда не вставляет строки в `appointments` напрямую.
+`service_id`, `appointmentId`, дата и время из `callback_data` всегда
+перепроверяются на сервере (деактивированная услуга, чужая/несуществующая
+запись, занятый слот) — кнопка лишь подсказывает намерение клиента, а не
+является источником истины.
+
+### booking_sessions — явная конечная модель состояний
+
+Состояние диалога живёт только в таблице `booking_sessions`, не в памяти
+процесса (serverless-среда не гарантирует переиспользование инстанса между
+запросами):
+
+```
+idle → choosing_service → choosing_date → choosing_slot → confirming
+                                                              │
+                                                    reserveAppointment
+                                                              │
+                                                              ▼
+                                                        (снова idle)
+```
+
+`step` в БД — свободный `text` без `CHECK` (Этап 1 не ограничивал набор
+значений), поэтому весь набор допустимых состояний контролируется в
+приложении (`BOOKING_SESSION_STEPS` в `booking-sessions.ts`). Каждый
+переход: (1) читает текущее состояние и проверяет, что колбэк соответствует
+ожидаемому шагу — иначе это устаревшая кнопка; (2) `telegram_user_id`
+всегда берётся из аутентифицированного контекста запроса, а не из
+`callback_data` — подменить чужую сессию нельзя; (3) полностью заменяет все
+четыре поля состояния разом (не частичный `patch`), чтобы шаг «назад» не
+мог оставить данные более позднего шага; (4) продлевает `expires_at` (TTL
+30 минут). Просроченная или структурно повреждённая (нераспознанный
+`step` — например, от будущей несовместимой версии бота) сессия безопасно
+трактуется как `idle`, а не как ошибка.
+
+### Идемпотентность Telegram-обновлений
+
+Telegram может повторно доставить один и тот же `update_id` (не получив
+вовремя `200 OK`). Защита — `processed_telegram_updates` по модели
+**claim → process → release-on-failure**, реализованной в
+`lib/telegram/idempotency.ts`:
+
+1. **claim** — `INSERT telegram_update_id`. Атомарность обеспечивает
+   первичный ключ таблицы, а не `SELECT`, а потом отдельный `INSERT`: два
+   параллельных запроса с одним `update_id` всегда дают ровно один успешный
+   `INSERT` и один конфликт `23505`, в любом порядке выполнения. Конфликт
+   означает «уже обрабатывается параллельно или уже полностью обработан
+   ранее» — обработка пропускается, webhook отвечает успехом без повторного
+   бизнес-действия.
+2. Если обработка (получение сессии, вызов `reserveAppointment`/
+   `cancelAppointmentByClient` и т.д.) бросает исключение — **release**
+   (`DELETE` claim), чтобы следующая доставка того же `update_id` получила
+   новую попытку, а не молчаливо считалась обработанной, хотя бизнес-действие
+   не завершилось.
+3. Если обработка успешна — claim остаётся навсегда: этот конкретный
+   `update_id` больше никогда не обрабатывается повторно.
+
+Это требует `DELETE` для `service_role` на `processed_telegram_updates`,
+которого не было в изначальной схеме Этапа 1 (там был только
+`SELECT`+`INSERT` — этого достаточно для однократной регистрации, но не для
+отката). Новая миграция
+`20260716140000_processed_telegram_updates_claim_retry.sql` выдаёт этот
+`DELETE` и **падает при применении**, если после `REVOKE`/`GRANT`
+`anon`/`authenticated`/`PUBLIC` получили хоть какую-то привилегию на эту
+таблицу, если `service_role` не имеет ровно `SELECT`+`INSERT`+`DELETE`, или
+если у него оказался лишний `UPDATE` (эта модель его не требует). Права
+`anon`/`authenticated` не меняются вообще — они как не имели доступа к этой
+таблице, так и не имеют.
+
+Middleware в `lib/telegram/bot.ts` выполняет claim первым, до всего
+остального: если `next()` (весь дальнейший конвейер — определение чата,
+профиль клиента, обработчик команды/колбэка) бросает исключение, claim
+освобождается и ошибка пробрасывается дальше — наверх, к webhook route,
+который вернёт Telegram статус, вызывающий повторную доставку.
+
+### Безопасность вебхука
+
+`app/api/telegram/webhook/route.ts` экспортирует только `POST` — Next.js
+сам вернёт `405` на любой другой метод. Проверка заголовка
+`X-Telegram-Bot-Api-Secret-Token` встроена в grammY (`webhookCallback` с
+`secretToken`): сравнение — константное по времени побайтовое XOR без
+короткого замыкания (`compareSecretToken` в
+`node_modules/grammy/out/convenience/webhook.js`), и оно выполняется
+**до** разбора тела запроса как JSON — неверный или отсутствующий секрет
+получает `401`, не коснувшись полезной нагрузки. Отдельная ручная проверка
+секрета не добавляла бы защиты поверх уже константной по времени проверки
+grammY, поэтому `lib/telegram/webhook-handler.ts` полагается на неё, а не
+дублирует.
+
+`TELEGRAM_BOT_TOKEN` никогда не попадает в URL/лог/текст ошибки, которые
+видит кто-либо, кроме сервера: ни один `console.*` в Telegram-коде его не
+печатает, а ручные `scripts/telegram/*` скрипты используют `redactToken()`
+на случай, если сетевая ошибка `fetch` включит URL целиком. При внутренней
+ошибке обработки update `webhook-handler.ts` логирует **только**
+`update_id`, тип update (`message`/`callback_query`/...) и стабильный
+внутренний код ошибки — никогда весь объект update (там может быть текст
+сообщения, имя клиента и т.д.) и никогда сырой текст ошибки БД; в ответ
+Telegram уходит `5xx` без тела, чтобы он повторил доставку, а не `2xx`
+с фактически невыполненным действием.
+
+### callback_data — компактный кодек, не JSON
+
+`lib/telegram/callback-data.ts`: формат `"1|<action>|<payload>"` (версия,
+действие, необязательная нагрузка), разделитель `|`, а не `:` — потому что
+payload может быть ISO-датой вида `2026-07-20T11:00:00+03:00`, которая сама
+содержит `:`. UUID/дата/datetime/номер страницы проверяются строгими
+Zod-схемами (`z.uuid()`, `z.iso.date()`, `z.iso.datetime({ offset: true })`);
+неизвестное действие, неверная версия, повреждённый формат или невалидное
+значение — `decodeCallbackData` возвращает `null`, а не бросает исключение,
+и вызывающий код обязан явно обработать `null` (см. `showStaleButton` в
+`handlers/callbacks.ts`). В payload нет ни PII, ни секретов, ни больших
+JSON — только сам параметр (id/дата/время/страница). `handleCallbackQuery`
+вызывает `ctx.answerCallbackQuery()` в `finally` — гарантированно, даже
+если разбор данных не удался или обработчик бросил исключение, иначе
+кнопка в интерфейсе Telegram виснет с крутящимся индикатором навсегда.
+
+### Команды бота
+
+| Команда | Действие |
+|---|---|
+| `/start` | приветствие + главное меню |
+| `/book` | начать (или начать заново) сценарий записи |
+| `/mybookings` | список своих будущих подтверждённых записей |
+| `/help` | список команд |
+| `/cancel` | отменить **текущий незавершённый сценарий записи** (не запись в БД) |
+
+Бот работает только в личных чатах — `bot.chatType("private")` в
+`lib/telegram/bot.ts` не пропускает обновления из групп/супергрупп/каналов
+дальше профиля клиента и сценария бронирования.
+
+### Ручная настройка бота (BotFather + вебхук)
+
+Ничего из этого **не выполнялось** в рамках разработки — ни к какому
+реальному Telegram-боту не обращались (`scripts/telegram/*` не запускались
+с реальным токеном; `TELEGRAM_BOT_TOKEN` в этом окружении нет).
+
+1. Создать бота через [@BotFather](https://t.me/BotFather), получить
+   `TELEGRAM_BOT_TOKEN` и `TELEGRAM_BOT_USERNAME`, заполнить их в
+   `.env.local` вместе со сгенерированным самостоятельно
+   `TELEGRAM_WEBHOOK_SECRET` (1–256 символов, `A-Za-z0-9_-`).
+2. Задеплоить приложение на HTTPS-адрес (Vercel — Этап 7) и убедиться, что
+   `NEXT_PUBLIC_APP_URL` в продакшен-окружении указывает на этот адрес.
+3. Только после этого — `npm run telegram:webhook:set` (регистрирует
+   `https://<домен>/api/telegram/webhook` с `secret_token` и
+   `allowed_updates: ["message", "callback_query"]`) и
+   `npm run telegram:commands:set` (регистрирует список команд в меню
+   Telegram). `npm run telegram:webhook:info` — проверить текущее
+   состояние, `npm run telegram:webhook:delete` — снять вебхук
+   (`--drop-pending-updates` — явный флаг для сброса очереди накопленных
+   обновлений, по умолчанию они сохраняются).
+
+Ни один из этих скриптов не выполняется автоматически (не часть
+`dev`/`build`/`test`/CI) и не печатает значения токена/секрета.
+
+### Тесты Этапа 3
+
+Unit (`tests/unit/telegram-*.test.ts`, без БД и без сети):
+`telegram-callback-data` (кодек, unknown action, невалидный UUID/дата/
+datetime/страница, лимит в 64 байта), `telegram-user-profile` (немедленная
+конвертация id в строку), `telegram-formatters` (дата/время/длительность/
+цена в конкретном часовом поясе — не в серверном), `telegram-messages`
+(каждый `BookingErrorCode` даёт непустое и различное русское сообщение без
+следов SQL), `telegram-webhook-handler` (401 без заголовка, 401 с неверным
+секретом, обработка не запускается до проверки секрета, безопасное
+логирование при ошибке), `telegram-callbacks` (переходы `booking_sessions`
+на моках репозиториев, `answerCallbackQuery` вызывается всегда — включая
+случай, когда обработчик бросает исключение, — устаревшая кнопка, чужой
+`appointmentId`, `SLOT_TAKEN` при подтверждении).
+
+Интеграционные (`tests/integration/telegram-bot-flow.test.ts`, реальный
+PostgreSQL — как и `booking-functions.test.ts`, напрямую теми же SQL-
+операциями, что выполняют репозитории, под `service_role`, т.к. локально
+нет поднятого PostgREST для реального `supabase-js`): upsert клиента без
+затирания полей `null`, создание/восстановление/полная замена
+`booking_sessions`, очистка сессии после брони, повторная доставка одного
+`update_id` (конфликт `23505`), **параллельная** доставка одного `update_id`
+на двух независимых подключениях (ровно один claim успешен), release+повторный
+claim, подмена `appointmentId` чужой записи (0 строк), список только своих
+будущих подтверждённых записей, `SLOT_TAKEN` (`23P01`) при повторном
+бронировании занятого слота, и полный сценарий от `/start` до появления
+записи в «моих записях».
+
 ## Локальный запуск
 
 Требуется Node.js 24 LTS версии из `.nvmrc` (используйте `nvm use`); та же
@@ -570,7 +837,18 @@ npm run test:sql           # SQL/pgTAP-тесты на локальной баз
 npm run test:integration   # настоящий конкурентный тест (нужен TEST_DATABASE_URL)
 npm run test:all           # test:unit && test:sql && test:integration
 npm run build               # production build
+
+npm run telegram:webhook:info     # текущая конфигурация webhook (getWebhookInfo)
+npm run telegram:webhook:set      # зарегистрировать webhook (после HTTPS-деплоя)
+npm run telegram:webhook:delete   # удалить webhook (--drop-pending-updates — явный сброс очереди)
+npm run telegram:commands:set     # зарегистрировать список команд бота в Telegram
 ```
+
+Все `telegram:*` команды — ручные CLI-утилиты (`scripts/telegram/`), они
+никогда не запускаются автоматически (не часть `dev`/`build`/`test`) и
+требуют реальных `TELEGRAM_BOT_TOKEN`/`NEXT_PUBLIC_APP_URL`/
+`TELEGRAM_WEBHOOK_SECRET` в `.env.local` — подробности в разделе "Этап 3:
+Telegram-бот".
 
 ## Дальнейшие этапы
 
@@ -578,7 +856,7 @@ npm run build               # production build
 2. ~~Механизм доступности и атомарное бронирование
    (`get_available_slots`, `reserve_appointment`, `cancel_appointment_by_client`).~~
    Готово.
-3. Telegram-бот.
+3. ~~Telegram-бот и клиентский сценарий записи.~~ Готово.
 4. Авторизация и административная панель.
 5. Напоминания.
 6. Полное тестирование (unit, SQL, integration, Playwright).

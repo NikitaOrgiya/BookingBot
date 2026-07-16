@@ -12,12 +12,6 @@ import { z } from "zod";
  * process.env.NEXT_PUBLIC_*, а не импортировать этот файл.
  */
 
-const ianaTimeZones = new Set(Intl.supportedValuesOf("timeZone"));
-
-function isValidIanaTimeZone(value: string): boolean {
-  return ianaTimeZones.has(value);
-}
-
 const envSchema = z.object({
   NEXT_PUBLIC_APP_URL: z
     .string({ message: "NEXT_PUBLIC_APP_URL обязателен" })
@@ -47,20 +41,22 @@ const envSchema = z.object({
   TELEGRAM_BOT_USERNAME: z
     .string({ message: "TELEGRAM_BOT_USERNAME обязателен" })
     .min(1, "TELEGRAM_BOT_USERNAME не может быть пустым"),
+  // Telegram ограничивает secret_token webhook'а: 1-256 символов, только
+  // A-Z, a-z, 0-9, "_" и "-" (см. https://core.telegram.org/bots/api#setwebhook).
+  // Значение сверяется с заголовком X-Telegram-Bot-Api-Secret-Token в
+  // app/api/telegram/webhook/route.ts константным по времени сравнением.
   TELEGRAM_WEBHOOK_SECRET: z
     .string({ message: "TELEGRAM_WEBHOOK_SECRET обязателен" })
-    .min(1, "TELEGRAM_WEBHOOK_SECRET не может быть пустым"),
+    .min(1, "TELEGRAM_WEBHOOK_SECRET не может быть пустым")
+    .max(256, "TELEGRAM_WEBHOOK_SECRET не может быть длиннее 256 символов")
+    .regex(
+      /^[A-Za-z0-9_-]+$/,
+      "TELEGRAM_WEBHOOK_SECRET может содержать только A-Z, a-z, 0-9, '_' и '-' (ограничение Telegram Bot API)"
+    ),
 
   CRON_SECRET: z
     .string({ message: "CRON_SECRET обязателен" })
     .min(1, "CRON_SECRET не может быть пустым"),
-  BUSINESS_TIMEZONE: z
-    .string({ message: "BUSINESS_TIMEZONE обязателен" })
-    .min(1, "BUSINESS_TIMEZONE не может быть пустым")
-    .refine(isValidIanaTimeZone, {
-      message:
-        "BUSINESS_TIMEZONE должен быть настоящим IANA-идентификатором часового пояса (например, Europe/Moscow), а не смещением (UTC+3) или сокращённым/ошибочным названием",
-    }),
 });
 
 export type Env = z.infer<typeof envSchema>;

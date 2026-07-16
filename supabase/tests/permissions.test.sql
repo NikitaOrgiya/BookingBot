@@ -90,7 +90,7 @@ select table_privs_are('public', 'appointments', 'service_role', '{SELECT,INSERT
 
 select table_privs_are('public', 'processed_telegram_updates', 'anon', '{}'::name[], 'anon: 0 прав на processed_telegram_updates');
 select table_privs_are('public', 'processed_telegram_updates', 'authenticated', '{}'::name[], 'authenticated: 0 прав на processed_telegram_updates');
-select table_privs_are('public', 'processed_telegram_updates', 'service_role', '{SELECT,INSERT}'::name[], 'service_role: SELECT+INSERT на processed_telegram_updates');
+select table_privs_are('public', 'processed_telegram_updates', 'service_role', '{SELECT,INSERT,DELETE}'::name[], 'service_role: SELECT+INSERT+DELETE на processed_telegram_updates (модель claim/release, Этап 3)');
 
 select table_privs_are('public', 'notification_deliveries', 'anon', '{}'::name[], 'anon: 0 прав на notification_deliveries');
 select table_privs_are('public', 'notification_deliveries', 'authenticated', '{SELECT}'::name[], 'authenticated: только SELECT на notification_deliveries');
@@ -328,6 +328,20 @@ select throws_ok(
   $$insert into public.processed_telegram_updates (telegram_update_id) values (555)$$,
   '23505', null,
   'повторный тот же Telegram update отклоняется первичным ключом'
+);
+
+-- 12a. Модель claim/release (Этап 3, lib/telegram/idempotency.ts): при
+-- ошибке обработки claim удаляется (release), после чего update можно
+-- заявить (claim) заново — ровно то поведение, которого требует retry
+-- Telegram при 5xx. service_role должен иметь именно SELECT+INSERT+DELETE,
+-- без UPDATE (проверено выше в разделе GRANT).
+select lives_ok(
+  $$delete from public.processed_telegram_updates where telegram_update_id = 555$$,
+  'release: удаление claim после неудачной обработки проходит успешно'
+);
+select lives_ok(
+  $$insert into public.processed_telegram_updates (telegram_update_id) values (555)$$,
+  're-claim: тот же update_id можно заявить заново после release'
 );
 
 -- 13. Одно и то же напоминание нельзя запланировать дважды для одной
