@@ -8,9 +8,8 @@ const validEnv = {
   SUPABASE_SECRET_KEY: "sb_secret_example",
   TELEGRAM_BOT_TOKEN: "123:abc",
   TELEGRAM_BOT_USERNAME: "bookingbot_test_bot",
-  TELEGRAM_WEBHOOK_SECRET: "webhook-secret",
+  TELEGRAM_WEBHOOK_SECRET: "webhook_secret-123",
   CRON_SECRET: "cron-secret",
-  BUSINESS_TIMEZONE: "Europe/Moscow",
 };
 
 describe("parseEnv", () => {
@@ -57,24 +56,38 @@ describe("parseEnv", () => {
     ).toThrowError(/NEXT_PUBLIC_SUPABASE_URL/);
   });
 
-  it.each(["Europe/Moscow", "Europe/London", "Asia/Almaty", "America/New_York"])(
-    "принимает настоящий IANA часовой пояс %s",
-    (timezone) => {
-      const env = parseEnv({ ...validEnv, BUSINESS_TIMEZONE: timezone });
-      expect(env.BUSINESS_TIMEZONE).toBe(timezone);
+  it("не содержит BUSINESS_TIMEZONE — эта переменная не используется архитектурой", () => {
+    // Этап 2 уже сделал business_settings.timezone (столбец в БД)
+    // источником истины для всех SQL-функций бронирования; seed.sql
+    // тоже хранит часовой пояс прямо в строке, а не читает env. К началу
+    // Этапа 3 BUSINESS_TIMEZONE нигде в коде не использовался (см. git
+    // history) — это была мёртвая переменная. Бот (lib/telegram/formatters.ts)
+    // читает часовой пояс из той же таблицы business_settings, а не из env,
+    // чтобы не было двух источников истины. Поэтому переменная удалена из
+    // схемы целиком, а не просто ослаблена.
+    const env = parseEnv(validEnv);
+    expect(env).not.toHaveProperty("BUSINESS_TIMEZONE");
+  });
+
+  it.each(["webhook_secret-123", "A", "1".repeat(256), "abc_ABC-123"])(
+    "принимает корректный TELEGRAM_WEBHOOK_SECRET %s",
+    (secret) => {
+      const env = parseEnv({ ...validEnv, TELEGRAM_WEBHOOK_SECRET: secret });
+      expect(env.TELEGRAM_WEBHOOK_SECRET).toBe(secret);
     }
   );
 
   it.each([
-    "Europe/Moskow", // опечатка
-    "UTC+3", // смещение, а не IANA-идентификатор
-    "Moscow", // город без региона
-    "GMT+3",
-    "not/a-timezone",
-    "",
-  ])("отклоняет некорректный часовой пояс %s", (timezone) => {
+    "", // пустая строка
+    "1".repeat(257), // длиннее 256 символов
+    "secret with spaces",
+    "secret:with:colons",
+    "секрет-кириллица",
+    "secret.with.dots",
+    "secret+plus",
+  ])("отклоняет некорректный TELEGRAM_WEBHOOK_SECRET %j", (secret) => {
     expect(() =>
-      parseEnv({ ...validEnv, BUSINESS_TIMEZONE: timezone })
-    ).toThrowError(/BUSINESS_TIMEZONE/);
+      parseEnv({ ...validEnv, TELEGRAM_WEBHOOK_SECRET: secret })
+    ).toThrowError(/TELEGRAM_WEBHOOK_SECRET/);
   });
 });

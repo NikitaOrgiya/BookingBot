@@ -94,7 +94,7 @@ describe.skipIf(!connectionString)(
       await setupClient?.end();
     });
 
-    it("ровно одна из двух одновременных вставок одного слота успешна, вторая отклонена SQLSTATE 23P01", async () => {
+    it("ровно одна из двух одновременных вставок одного слота успешна, вторая отклонена SQLSTATE 23P01 или 40P01", async () => {
       const insertSql = `
         insert into public.appointments (
           telegram_user_id, service_id, service_name_snapshot,
@@ -122,10 +122,25 @@ describe.skipIf(!connectionString)(
 
       expect(fulfilled).toHaveLength(1);
       expect(rejected).toHaveLength(1);
-      expect(rejected[0].reason).toMatchObject({ code: "23P01" });
+      // Это низкоуровневый тест сырого INSERT в обход reserve_appointment
+      // (и, следовательно, в обход retry-логики lib/booking/
+      // reserve-appointment.ts) — честная гонка на GiST exclusion
+      // constraint под конкурентной вставкой пересекающихся интервалов
+      // документированно может дать проигравшей транзакции ЛИБО штатный
+      // 23P01 (exclusion_violation), ЛИБО, реже, 40P01 (deadlock_detected,
+      // конкурирующие блокировки страниц индекса) — оба варианта
+      // легитимны на этом уровне. Гарантию "проигравший ВСЕГДА получает
+      // стабильный SLOT_TAKEN, никогда INTERNAL_ERROR" на прикладном
+      // TypeScript-уровне (с retry на 40P01) проверяет отдельный тест —
+      // см. tests/integration/reserve-appointment-race.test.ts, секция
+      // "конкурентная гонка через прикладной путь reserveAppointment".
+      expect(["23P01", "40P01"]).toContain(
+        (rejected[0].reason as { code?: string }).code
+      );
 
       // В таблице реально осталась ровно одна запись на этот интервал —
-      // не ноль и не две.
+      // не ноль и не две, независимо от того, каким SQLSTATE отклонился
+      // проигравший запрос.
       const { rows } = await setupClient.query(
         `select count(*)::int as count from public.appointments where telegram_user_id = $1`,
         [telegramUserRowId]
