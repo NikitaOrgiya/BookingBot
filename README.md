@@ -30,6 +30,24 @@ Telegram-бот для онлайн-записи клиентов с админ�
 - `supabase/seed.sql` со стартовыми настройками организации;
 - pgTAP-тесты на GRANT, RLS и SECURITY DEFINER (`supabase/tests/`).
 
+**Корректирующий этап (по итогам аудита Этапов 0-1)** — готово.
+
+- закреплённая версия Node.js обновлена до актуальной LTS-ветки 24
+  (`.nvmrc` + `engines.node` в `package.json`);
+- `BUSINESS_TIMEZONE` теперь проверяется как настоящий IANA-идентификатор
+  (`Europe/Moskow`, `UTC+3`, `Moscow` отклоняются, а не только "непустая
+  строка");
+- новая миграция `20260716120000_reminder_minutes_and_privilege_audit.sql`:
+  `reminder_first_minutes`/`reminder_second_minutes` не могут быть
+  отрицательными, плюс самопроверяющий блок, который сам падает с ошибкой,
+  если после всех `REVOKE`/`GRANT` у `anon` осталась хоть одна табличная
+  привилегия или SECURITY DEFINER-функция выполнима ролью `PUBLIC`;
+- честно переописан последовательный pgTAP-тест exclusion constraint —
+  он больше не выдаётся за проверку конкурентной гонки;
+- добавлен настоящий integration-тест `tests/integration/double-booking-race.test.ts`
+  с двумя независимыми подключениями к PostgreSQL;
+- отдельные npm-команды `test:unit`/`test:sql`/`test:integration`/`test:all`.
+
 **Намеренно не реализовано пока:** Telegram-бот, административная панель,
 авторизация, напоминания, функции доступности и бронирования
 (`get_available_slots`, `reserve_appointment`, `cancel_appointment_by_client`
@@ -67,7 +85,9 @@ lib/
   auth/                  проверка прав администратора
   env.ts                 Zod-валидация переменных окружения
 
-scripts/                скрипты настройки Telegram webhook, проверки env
+scripts/
+  test-sql.sh            прогон SQL/pgTAP-тестов на локальной базе
+                          (сюда же лягут скрипты настройки Telegram webhook)
 
 supabase/
   migrations/            SQL-миграции
@@ -94,6 +114,18 @@ tests/
 клиентском компоненте приведёт к ошибке сборки — секреты физически не могут
 попасть в браузер через этот модуль.
 
+`BUSINESS_TIMEZONE` проверяется не просто как непустая строка, а как
+настоящий IANA-идентификатор часового пояса — значение должно входить в
+`Intl.supportedValuesOf("timeZone")`. Опечатки (`Europe/Moskow`), смещения
+(`UTC+3`, `GMT+3`) и сокращённые названия городов (`Moscow`) отклоняются
+ещё на этапе проверки окружения, а не приводят к тихим ошибкам при расчёте
+расписания.
+
+`TEST_DATABASE_URL` нужен только для `npm run test:integration` (реальный
+конкурентный тест) — это не переменная приложения и в `.env.example` она
+не входит. Подробности — в разделе "SQL-тесты и настоящий конкурентный
+тест".
+
 ## База данных
 
 Схема описана в `supabase/migrations/` — по одной миграции на таблицу (плюс
@@ -102,6 +134,27 @@ tests/
 `admin_users`, `services`, `working_hours`, `schedule_blocks`,
 `telegram_users`, `booking_sessions`, `appointments`,
 `processed_telegram_updates`, `notification_deliveries`.
+
+Миграции применяются последовательно и не переписываются задним числом —
+исправления оформляются новыми файлами. Например,
+`20260716120000_reminder_minutes_and_privilege_audit.sql` добавляет поверх
+уже применённой схемы:
+
+- `CHECK`, запрещающий отрицательные `reminder_first_minutes` и
+  `reminder_second_minutes` в `business_settings` (раньше были защищены
+  только `min_booking_notice_minutes`/`cancellation_notice_minutes`);
+- повторный `REVOKE ALL ... FROM PUBLIC` на функциях схемы `public` —
+  на случай, если будущая `CREATE OR REPLACE FUNCTION` незаметно вернёт
+  привилегию по умолчанию;
+- блок `DO $$ ... $$`, который **падает с ошибкой при применении
+  миграции**, если `anon` имеет хоть одну табличную привилегию в схеме
+  `public` (лично или через псевдороль `PUBLIC`), если `authenticated`
+  имеет доступ к `admin_users`/`booking_sessions`/`processed_telegram_updates`
+  или `INSERT`/`DELETE` на `appointments`, либо если какая-то
+  `SECURITY DEFINER`-функция выполнима ролью `PUBLIC`. Это не просто
+  комментарий с намерением: `psql` реально прерывает миграцию, если
+  что-то из этого правда (проверено вручную — временный `grant select on
+  services to anon` действительно валит блок с понятным сообщением).
 
 ### Защита от двойного бронирования
 
@@ -119,9 +172,20 @@ exclude using gist (
 Два активных (не отменённых) интервала времени физически не могут
 пересечься — вставка второго упадёт с `SQLSTATE 23P01` (`exclusion_violation`),
 которую сервер конвертирует в понятный клиенту код `SLOT_TAKEN` (появится на
-Этапе 2 вместе с функцией `reserve_appointment`). Это проверено тестом
-`supabase/tests/permissions.test.sql`: параллельная вставка второй
-пересекающейся записи отклоняется базой данных, а не кодом приложения.
+Этапе 2 вместе с функцией `reserve_appointment`). Это защита на уровне двух
+разных тестов с разными гарантиями (не путать один с другим):
+
+- `supabase/tests/permissions.test.sql` — **последовательный** pgTAP-тест:
+  доказывает, что constraint определён правильно (два INSERT одного за
+  другим в одной сессии, второй отклоняется). Он **не** проверяет
+  конкурентную гонку — оба запроса выполняются друг за другом, а не
+  одновременно.
+- `tests/integration/double-booking-race.test.ts` — **настоящий**
+  конкурентный тест: два независимых TCP-подключения к PostgreSQL
+  одновременно (`Promise.allSettled`, без `await` между запросами)
+  пытаются вставить один и тот же интервал. Ровно один запрос завершается
+  успехом, второй — ошибкой `23P01`. Подробности и переменные окружения —
+  в разделе "SQL-тесты и настоящий конкурентный тест" ниже.
 
 ### RLS и GRANT — два независимых механизма
 
@@ -178,46 +242,69 @@ revoke all on all tables in schema public from authenticated;
 
 Мы работаем не в самом Supabase, а в обычном PostgreSQL, поэтому для
 локальных тестов нужно сначала создать роли `anon`/`authenticated`/
-`service_role` и заглушку схемы `auth` (в реальном Supabase-проекте они уже
-есть, создавать их в `supabase/migrations/` нельзя — это ломает
-production-проект):
+`service_role` и заглушку схемы `auth` через
+`supabase/tests/local_bootstrap.sql` (в реальном Supabase-проекте они уже
+есть — создавать их в `supabase/migrations/` нельзя, это ломает
+production-проект; там применяются только файлы из `supabase/migrations/`
+и `seed.sql`, например через `supabase db push`). Команда `npm run
+test:sql` (см. ниже) выполняет весь этот порядок автоматически.
 
-```bash
-createdb bookingbot_test
-psql bookingbot_test -f supabase/tests/local_bootstrap.sql   # только для локальных тестов
-for f in supabase/migrations/*.sql; do psql bookingbot_test -f "$f"; done
-psql bookingbot_test -f supabase/seed.sql
-```
+### SQL-тесты и настоящий конкурентный тест
 
-Против настоящего Supabase-проекта `local_bootstrap.sql` не запускается —
-там применяются только файлы из `supabase/migrations/` и `seed.sql`
-(например, через `supabase db push` или `supabase migration up`).
-
-### SQL-тесты (pgTAP)
-
-`supabase/tests/permissions.test.sql` проверяет GRANT, RLS и
+`supabase/tests/permissions.test.sql` (pgTAP) проверяет GRANT, RLS и
 `SECURITY DEFINER` отдельно друг от друга: точный набор привилегий каждой
 роли на каждой таблице, что RLS включена и принудительна (`FORCE`) везде,
 кроме `admin_users`, что `anon` не видит вообще ничего, что обычный
 `authenticated`-пользователь не видит админских данных (0 строк, не
 ошибка), что администратор видит и может менять услуги/расписание, но не
-может обойти ограничения (ни `CHECK`, ни отсутствующий `GRANT` на `INSERT`
-в `appointments`), и что двойное бронирование, повторный Telegram update и
-повторное напоминание отклоняются самой базой данных.
+может обойти ограничения (ни `CHECK`, включая новые `reminder_*_minutes`,
+ни отсутствующий `GRANT` на `INSERT` в `appointments`), что повторный
+Telegram update и повторное напоминание отклоняются самой базой данных, и
+что exclusion constraint определён правильно (**последовательная**
+проверка — см. предупреждение прямо в файле теста, почему это не
+заменяет проверку гонки).
+
+Команда `npm run test:sql` делает то же самое одним вызовом
+(`scripts/test-sql.sh`): пересоздаёт локальную базу `bookingbot_test`,
+накатывает `local_bootstrap.sql` + все миграции + `seed.sql`, ставит
+расширение `pgtap` и запускает `pg_prove`. Параметры подключения — из
+обычных переменных libpq (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`);
+по умолчанию используется локальный сокет текущего пользователя.
 
 ```bash
 apt-get install -y postgresql-16-pgtap   # один раз, локально или в CI
-createdb bookingbot_test
-psql bookingbot_test -f supabase/tests/local_bootstrap.sql
-for f in supabase/migrations/*.sql; do psql bookingbot_test -f "$f"; done
-psql bookingbot_test -f supabase/seed.sql
-psql bookingbot_test -c 'create extension if not exists pgtap;'
-pg_prove -d bookingbot_test supabase/tests/permissions.test.sql
+npm run test:sql
+```
+
+Настоящий тест конкурентной гонки —
+`tests/integration/double-booking-race.test.ts` (Vitest + `pg`). В отличие
+от pgTAP-теста выше, он открывает **два независимых** `pg.Client`-подключения
+и отправляет оба `INSERT` одного и того же интервала без ожидания друг
+друга (`Promise.allSettled`) — PostgreSQL обрабатывает каждое подключение в
+своём backend-процессе, поэтому гонка происходит по-настоящему на уровне
+базы данных, а не эмулируется в одном процессе Node.js. Тест проверяет, что
+ровно один запрос успешен, ровно один отклонён с `SQLSTATE 23P01`, что в
+таблице реально осталась одна строка (не ноль, не две), и в конце удаляет
+все созданные им данные.
+
+Требуемая переменная окружения — `TEST_DATABASE_URL`: строка подключения к
+PostgreSQL с уже применёнными миграциями и `local_bootstrap.sql` (проще
+всего — та же `bookingbot_test`, которую только что подготовил
+`npm run test:sql`). Роль в строке подключения должна иметь право
+выполнить `set role service_role` (суперпользователь — самый простой
+вариант для локальной разработки/CI). Если переменная не задана, тест
+пропускается (`describe.skipIf`), а не падает и не подделывает результат.
+
+```bash
+npm run test:sql   # готовит и мигрирует bookingbot_test
+export TEST_DATABASE_URL="postgresql://postgres:<пароль>@127.0.0.1:5432/bookingbot_test"
+npm run test:integration
 ```
 
 ## Локальный запуск
 
-Требуется Node.js версии из `.nvmrc` (используйте `nvm use`).
+Требуется Node.js 24 LTS версии из `.nvmrc` (используйте `nvm use`); та же
+версия закреплена в `engines.node` в `package.json`.
 
 ```bash
 npm install
@@ -231,10 +318,14 @@ npm run dev
 ## Команды проверки
 
 ```bash
-npm run lint        # ESLint
-npm run typecheck   # проверка типов TypeScript
-npm run test         # unit-тесты (Vitest)
-npm run build        # production build
+npm run lint              # ESLint
+npm run typecheck         # проверка типов TypeScript
+npm run test               # unit-тесты (алиас test:unit)
+npm run test:unit          # unit-тесты (Vitest, tests/unit)
+npm run test:sql           # SQL/pgTAP-тесты на локальной базе (нужен PostgreSQL + pgtap)
+npm run test:integration   # настоящий конкурентный тест (нужен TEST_DATABASE_URL)
+npm run test:all           # test:unit && test:sql && test:integration
+npm run build               # production build
 ```
 
 ## Дальнейшие этапы

@@ -33,4 +33,25 @@ describe("parseEnv", () => {
       parseEnv({ ...validEnv, NEXT_PUBLIC_SUPABASE_URL: "not-a-url" })
     ).toThrowError(/NEXT_PUBLIC_SUPABASE_URL/);
   });
+
+  it.each(["Europe/Moscow", "Europe/London", "Asia/Almaty", "America/New_York"])(
+    "принимает настоящий IANA часовой пояс %s",
+    (timezone) => {
+      const env = parseEnv({ ...validEnv, BUSINESS_TIMEZONE: timezone });
+      expect(env.BUSINESS_TIMEZONE).toBe(timezone);
+    }
+  );
+
+  it.each([
+    "Europe/Moskow", // опечатка
+    "UTC+3", // смещение, а не IANA-идентификатор
+    "Moscow", // город без региона
+    "GMT+3",
+    "not/a-timezone",
+    "",
+  ])("отклоняет некорректный часовой пояс %s", (timezone) => {
+    expect(() =>
+      parseEnv({ ...validEnv, BUSINESS_TIMEZONE: timezone })
+    ).toThrowError(/BUSINESS_TIMEZONE/);
+  });
 });

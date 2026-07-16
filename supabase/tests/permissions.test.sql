@@ -31,6 +31,17 @@ insert into public.services (id, name, duration_minutes, price_cents, is_active)
 insert into public.telegram_users (id, telegram_user_id) values
   ('00000000-0000-0000-0000-0000000000b1', 111);
 
+-- business_settings — синглтон; строка может уже существовать из
+-- supabase/seed.sql, поэтому тест не полагается на конкретного автора
+-- строки и просто гарантирует, что она есть.
+insert into public.business_settings (
+  id, business_name, timezone, booking_horizon_days,
+  min_booking_notice_minutes, cancellation_notice_minutes
+) values (
+  1, 'Test Business', 'Europe/Moscow', 14, 120, 120
+)
+on conflict (id) do nothing;
+
 -- ---------------------------------------------------------------------
 -- 1. GRANT: расширение btree_gist установлено.
 -- ---------------------------------------------------------------------
@@ -242,6 +253,16 @@ select throws_ok(
   '42501', null,
   'администратор не может удалять записи (история не уничтожается)'
 );
+select throws_ok(
+  $$update public.business_settings set reminder_first_minutes = -1 where id = 1$$,
+  '23514', null,
+  'администратор не может обойти CHECK-ограничение reminder_first_minutes >= 0'
+);
+select throws_ok(
+  $$update public.business_settings set reminder_second_minutes = -1 where id = 1$$,
+  '23514', null,
+  'администратор не может обойти CHECK-ограничение reminder_second_minutes >= 0'
+);
 
 reset role;
 
@@ -263,13 +284,26 @@ select lives_ok(
   'service_role может создать запись'
 );
 
--- 11. Защита от двойного бронирования на уровне PostgreSQL: пересекающийся
---     интервал отклоняется exclusion constraint даже при прямой вставке.
+-- 11. exclusion constraint на appointments: структурная проверка, что
+--     ДВЕ ПОСЛЕДОВАТЕЛЬНЫЕ вставки пересекающегося интервала не могут
+--     обе существовать в таблице.
+--
+--     ВАЖНО: это НЕ тест на конкурентную гонку. Обе вставки здесь
+--     выполняются одна за другой в одной сессии/транзакции — pgTAP не
+--     умеет открывать два параллельных подключения. Этот тест доказывает
+--     только то, что constraint определён правильно (что exclusion
+--     constraint отклоняет пересечение вообще). Он не доказывает, что
+--     constraint устоит, если два клиента нажмут "Подтвердить" в один
+--     и тот же момент через два независимых соединения — для этого
+--     нужен настоящий параллельный тест с двумя реальными подключениями
+--     к PostgreSQL, который выполняется отдельно, в
+--     tests/integration/double-booking-race.test.ts (см. README, раздел
+--     "SQL-тесты и настоящий конкурентный тест").
 select throws_ok(
   $$insert into public.appointments (telegram_user_id, service_id, service_name_snapshot, duration_minutes_snapshot, price_cents_snapshot, start_at, end_at)
     values ('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000a1', 'Консультация', 60, 200000, '2026-07-20 14:30:00+03', '2026-07-20 15:30:00+03')$$,
   '23P01', null,
-  'пересекающееся время отклоняется exclusion constraint (SLOT_TAKEN)'
+  'exclusion constraint (последовательно): вторая пересекающаяся вставка отклоняется (SLOT_TAKEN)'
 );
 
 -- Отмена освобождает время: тот же интервал снова становится доступен.

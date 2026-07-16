@@ -2,13 +2,20 @@
   "name": "bookingbot",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "24.18.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:sql": "bash scripts/test-sql.sh",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:all": "npm run test:unit && npm run test:sql && npm run test:integration"
   },
   "dependencies": {
     "next": "16.2.10",
@@ -19,11 +26,13 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^24",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
+    "pg": "^8.22.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.10"

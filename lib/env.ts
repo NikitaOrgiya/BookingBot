@@ -12,6 +12,12 @@ import { z } from "zod";
  * process.env.NEXT_PUBLIC_*, а не импортировать этот файл.
  */
 
+const ianaTimeZones = new Set(Intl.supportedValuesOf("timeZone"));
+
+function isValidIanaTimeZone(value: string): boolean {
+  return ianaTimeZones.has(value);
+}
+
 const envSchema = z.object({
   NEXT_PUBLIC_APP_URL: z
     .string({ message: "NEXT_PUBLIC_APP_URL обязателен" })
@@ -42,7 +48,11 @@ const envSchema = z.object({
     .min(1, "CRON_SECRET не может быть пустым"),
   BUSINESS_TIMEZONE: z
     .string({ message: "BUSINESS_TIMEZONE обязателен" })
-    .min(1, "BUSINESS_TIMEZONE не может быть пустым"),
+    .min(1, "BUSINESS_TIMEZONE не может быть пустым")
+    .refine(isValidIanaTimeZone, {
+      message:
+        "BUSINESS_TIMEZONE должен быть настоящим IANA-идентификатором часового пояса (например, Europe/Moscow), а не смещением (UTC+3) или сокращённым/ошибочным названием",
+    }),
 });
 
 export type Env = z.infer<typeof envSchema>;
