@@ -1,6 +1,8 @@
 import "server-only";
 import { webhookCallback, type Bot } from "grammy";
 import type { BotContext } from "./context";
+import { BusyTelegramUpdateError } from "./idempotency";
+import { safeErrorCode } from "./safe-error-code";
 
 /**
  * Собирает web-standard Request/Response обработчик Telegram webhook поверх
@@ -49,9 +51,26 @@ export function createTelegramWebhookHandler(
         updateType,
         code: safeErrorCode(err),
       });
+      // grammY оборачивает любую ошибку middleware в BotError и кладёт
+      // исходно брошенное значение в поле .error (см. bot.handleUpdate в
+      // node_modules/grammy/out/bot.js) — поэтому BusyTelegramUpdateError
+      // нужно искать именно там, а не в самом err.
+      const inner = (err as { error?: unknown } | undefined)?.error ?? err;
+      if (inner instanceof BusyTelegramUpdateError) {
+        // Другой воркер прямо сейчас владеет ещё не истёкшим lease на этот
+        // update_id (см. lib/telegram/idempotency.ts). 503, а не 500/200:
+        // это не сбой обработки и не "уже обработано" — семантически это
+        // "попробуй ещё раз чуть позже", тот же смысл, который Telegram
+        // придаёт 5xx (продолжает повторную доставку), но отдельный код,
+        // отличимый в логах/метриках от реальных ошибок обработки.
+        return new Response(null, { status: 503 });
+      }
       // 5xx, а не 200 — Telegram должен повторить доставку этого update_id
-      // позже. Идемпотентность (claim/release) гарантирует, что повтор не
-      // продублирует бизнес-действие, если оно уже реально завершилось.
+      // позже. Crash-safe lease-идемпотентность (claim/complete/release,
+      // см. lib/telegram/idempotency.ts) гарантирует, что повтор не
+      // продублирует бизнес-действие, если оно уже реально завершилось —
+      // ни при обычной ошибке (release снимает lease), ни при аварийном
+      // завершении процесса (lease истекает сам по locked_until).
       return new Response(null, { status: 500 });
     }
   };
@@ -102,19 +121,4 @@ async function safeExtractUpdateInfo(
     // логируем без этих деталей, не бросаем исключение из обработчика ошибок.
     return { updateId: undefined, updateType: "unknown" };
   }
-}
-
-/** Стабильный, безопасный для логов код ошибки — без текста исключения,
- * который может содержать детали БД или иные внутренние подробности. */
-function safeErrorCode(err: unknown): string {
-  const inner = (err as { error?: unknown } | undefined)?.error ?? err;
-  if (
-    inner &&
-    typeof inner === "object" &&
-    "code" in inner &&
-    typeof (inner as { code: unknown }).code === "string"
-  ) {
-    return (inner as { code: string }).code;
-  }
-  return "INTERNAL_ERROR";
 }

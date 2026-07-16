@@ -14,6 +14,7 @@ import {
 import { editWithScreen } from "../respond";
 import {
   getOwnAppointmentById,
+  getOwnConfirmedAppointmentBySlot,
   listUpcomingAppointments,
   MY_BOOKINGS_PAGE_SIZE,
 } from "../repositories/appointments";
@@ -390,8 +391,30 @@ async function onConfirm(ctx: BotContext, startAt: string): Promise<void> {
     }
 
     if (err.code === "SLOT_TAKEN") {
-      // Показываем актуальные слоты заново, а не просто ошибку — ровно то,
-      // что требует сценарий.
+      // SLOT_TAKEN может означать не "слот занял кто-то другой", а
+      // "повторная доставка confirm-колбэка": этот же клиент уже успешно
+      // создал именно эту запись при предыдущей попытке (окно между тем,
+      // как reserveAppointment реально вставил строку, и тем, как процесс
+      // успел ответить/завершить claim — см. lib/telegram/idempotency.ts и
+      // supabase/migrations/20260716140000_...). В этом случае повторная
+      // доставка не должна показывать ложный "слот занят" — нужно
+      // воспроизвести тот же успешный результат идемпотентно.
+      const existing = await getOwnConfirmedAppointmentBySlot(
+        ctx.telegramUserRowId,
+        session.selectedServiceId,
+        startAt
+      );
+      if (existing) {
+        await clearBookingSession(ctx.telegramUserId);
+        await editWithScreen(ctx, {
+          text: formatBookingSuccessMessage(existing, settings.timezone),
+          keyboard: mainMenuScreen().keyboard,
+        });
+        return;
+      }
+
+      // Слот действительно занят кем-то другим — показываем актуальные
+      // слоты заново, а не просто ошибку.
       await setBookingSession(ctx.telegramUserId, {
         step: "choosing_slot",
         selectedServiceId: session.selectedServiceId,
@@ -464,6 +487,22 @@ async function onCancelConfirmed(ctx: BotContext, appointmentId: string): Promis
     if (!(err instanceof BookingError)) {
       throw err;
     }
+
+    if (err.code === "ALREADY_CANCELLED") {
+      // Повторная доставка того же confirm-колбэка отмены: запись уже
+      // была переведена в cancelled этим же клиентом при предыдущей
+      // попытке (cancel_appointment_by_client проверяет владение ДО
+      // проверки статуса — см. supabase/migrations/
+      // 20260716130100_booking_functions.sql — поэтому ALREADY_CANCELLED
+      // здесь возможен только для настоящего владельца записи, никогда
+      // для чужой). Безопасный идемпотентный успех, а не ошибка.
+      await editWithScreen(ctx, {
+        text: CANCEL_SUCCESS_MESSAGE,
+        keyboard: mainMenuScreen().keyboard,
+      });
+      return;
+    }
+
     await editWithScreen(ctx, {
       text: formatBookingErrorMessage(err.code),
       keyboard: mainMenuScreen().keyboard,

@@ -3,6 +3,7 @@ import { Bot } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
 import type { BotContext } from "@/lib/telegram/context";
 import { createTelegramWebhookHandler } from "@/lib/telegram/webhook-handler";
+import { BusyTelegramUpdateError } from "@/lib/telegram/idempotency";
 
 /**
  * Тесты изолируют createTelegramWebhookHandler от реального lib/telegram/
@@ -161,6 +162,27 @@ describe("createTelegramWebhookHandler: безопасное логирован�
     );
     const text = await response.text();
     expect(text).not.toContain("fake-token-not-real");
+
+    vi.restoreAllMocks();
+  });
+});
+
+describe("createTelegramWebhookHandler: retryable-статус при занятом claim (BusyTelegramUpdateError)", () => {
+  it("возвращает 503, а не 500/200, когда middleware сигнализирует busy-claim", async () => {
+    const bot = makeBot();
+    bot.on("message", (ctx) => {
+      throw new BusyTelegramUpdateError(ctx.update.update_id);
+    });
+    const handler = createTelegramWebhookHandler(bot, SECRET);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await handler(
+      makeUpdateRequest(minimalMessageUpdate({ update_id: 999 }), {
+        [SECRET_HEADER]: SECRET,
+      })
+    );
+
+    expect(response.status).toBe(503);
 
     vi.restoreAllMocks();
   });

@@ -90,7 +90,7 @@ select table_privs_are('public', 'appointments', 'service_role', '{SELECT,INSERT
 
 select table_privs_are('public', 'processed_telegram_updates', 'anon', '{}'::name[], 'anon: 0 прав на processed_telegram_updates');
 select table_privs_are('public', 'processed_telegram_updates', 'authenticated', '{}'::name[], 'authenticated: 0 прав на processed_telegram_updates');
-select table_privs_are('public', 'processed_telegram_updates', 'service_role', '{SELECT,INSERT,DELETE}'::name[], 'service_role: SELECT+INSERT+DELETE на processed_telegram_updates (модель claim/release, Этап 3)');
+select table_privs_are('public', 'processed_telegram_updates', 'service_role', '{SELECT,INSERT,UPDATE}'::name[], 'service_role: SELECT+INSERT+UPDATE на processed_telegram_updates (crash-safe lease-модель claim/complete/release, корректирующий аудит Этапа 3 — без DELETE)');
 
 select table_privs_are('public', 'notification_deliveries', 'anon', '{}'::name[], 'anon: 0 прав на notification_deliveries');
 select table_privs_are('public', 'notification_deliveries', 'authenticated', '{SELECT}'::name[], 'authenticated: только SELECT на notification_deliveries');
@@ -103,6 +103,22 @@ select table_privs_are('public', 'notification_deliveries', 'service_role', '{SE
 select function_privs_are('public', 'is_admin', '{}'::name[], 'anon', '{}'::name[], 'anon: не может вызывать is_admin()');
 select function_privs_are('public', 'is_admin', '{}'::name[], 'authenticated', '{EXECUTE}'::name[], 'authenticated: может вызывать is_admin()');
 select function_privs_are('public', 'is_admin', '{}'::name[], 'service_role', '{}'::name[], 'service_role: не нуждается в is_admin() (обходит RLS напрямую)');
+
+-- 3a. GRANT на функции crash-safe lease-модели идемпотентности
+--     (claim_telegram_update/complete_telegram_update/release_telegram_update,
+--     корректирующий аудит Этапа 3) — только service_role, как и у ядра
+--     бронирования (reserve_appointment/cancel_appointment_by_client).
+select function_privs_are('public', 'claim_telegram_update', '{bigint,integer}'::name[], 'anon', '{}'::name[], 'anon: не может вызывать claim_telegram_update()');
+select function_privs_are('public', 'claim_telegram_update', '{bigint,integer}'::name[], 'authenticated', '{}'::name[], 'authenticated: не может вызывать claim_telegram_update()');
+select function_privs_are('public', 'claim_telegram_update', '{bigint,integer}'::name[], 'service_role', '{EXECUTE}'::name[], 'service_role: может вызывать claim_telegram_update()');
+
+select function_privs_are('public', 'complete_telegram_update', '{bigint,uuid}'::name[], 'anon', '{}'::name[], 'anon: не может вызывать complete_telegram_update()');
+select function_privs_are('public', 'complete_telegram_update', '{bigint,uuid}'::name[], 'authenticated', '{}'::name[], 'authenticated: не может вызывать complete_telegram_update()');
+select function_privs_are('public', 'complete_telegram_update', '{bigint,uuid}'::name[], 'service_role', '{EXECUTE}'::name[], 'service_role: может вызывать complete_telegram_update()');
+
+select function_privs_are('public', 'release_telegram_update', '{bigint,uuid,text}'::name[], 'anon', '{}'::name[], 'anon: не может вызывать release_telegram_update()');
+select function_privs_are('public', 'release_telegram_update', '{bigint,uuid,text}'::name[], 'authenticated', '{}'::name[], 'authenticated: не может вызывать release_telegram_update()');
+select function_privs_are('public', 'release_telegram_update', '{bigint,uuid,text}'::name[], 'service_role', '{EXECUTE}'::name[], 'service_role: может вызывать release_telegram_update()');
 
 -- ---------------------------------------------------------------------
 -- 4. SECURITY DEFINER: is_admin() выполняется с правами владельца и с
@@ -318,30 +334,151 @@ select lives_ok(
   'после отмены то же время снова доступно для бронирования'
 );
 
--- 12. Идемпотентность обработки Telegram update: повторный тот же id
---     конфликтует с первичным ключом, а не создаёт вторую обработку.
-select lives_ok(
-  $$insert into public.processed_telegram_updates (telegram_update_id) values (555)$$,
-  'первая обработка Telegram update проходит успешно'
-);
-select throws_ok(
-  $$insert into public.processed_telegram_updates (telegram_update_id) values (555)$$,
-  '23505', null,
-  'повторный тот же Telegram update отклоняется первичным ключом'
+-- 12. Идемпотентность обработки Telegram update: crash-safe lease-модель
+--     claim/complete/release (корректирующий аудит Этапа 3, заменяет
+--     прежнюю модель claim/release на DELETE — см. lib/telegram/
+--     idempotency.ts и supabase/migrations/
+--     20260716140000_processed_telegram_updates_claim_retry.sql). Токены
+--     claim'ов сохраняются во временную таблицу, чтобы сравнивать их между
+--     последовательными вызовами внутри одного теста.
+
+create temporary table test_claim_capture (label text primary key, token uuid);
+
+-- 12a. Новый update_id: claimed, с непустым claim_token.
+insert into test_claim_capture
+  select 'new-claim', claim_token from public.claim_telegram_update(700);
+
+select isnt(
+  (select token from test_claim_capture where label = 'new-claim'),
+  null,
+  'claim нового update_id возвращает непустой claim_token'
 );
 
--- 12a. Модель claim/release (Этап 3, lib/telegram/idempotency.ts): при
--- ошибке обработки claim удаляется (release), после чего update можно
--- заявить (claim) заново — ровно то поведение, которого требует retry
--- Telegram при 5xx. service_role должен иметь именно SELECT+INSERT+DELETE,
--- без UPDATE (проверено выше в разделе GRANT).
-select lives_ok(
-  $$delete from public.processed_telegram_updates where telegram_update_id = 555$$,
-  'release: удаление claim после неудачной обработки проходит успешно'
+-- 12b. Тот же update_id прямо сейчас (lease ещё не истёк): busy, а не
+-- повторный claimed и не completed. claim_token для busy должен быть null.
+select is(
+  (select result from public.claim_telegram_update(700)),
+  'busy',
+  'повторный claim того же update_id с ещё не истёкшим lease: busy'
 );
-select lives_ok(
-  $$insert into public.processed_telegram_updates (telegram_update_id) values (555)$$,
-  're-claim: тот же update_id можно заявить заново после release'
+select is(
+  (select claim_token from public.claim_telegram_update(700)),
+  null,
+  'busy: claim_token в результате отсутствует (null)'
+);
+
+-- 12c. complete/release со случайным (заведомо неверным) claim_token не
+-- проходят и не меняют состояние строки.
+select is(
+  (select public.complete_telegram_update(700, gen_random_uuid())),
+  false,
+  'complete со случайным неверным claim_token: false, ничего не завершает'
+);
+select is(
+  (select public.release_telegram_update(700, gen_random_uuid())),
+  false,
+  'release со случайным неверным claim_token: false, ничего не освобождает'
+);
+select is(
+  (select result from public.claim_telegram_update(700)),
+  'busy',
+  'после неудачных complete/release состояние не изменилось: всё ещё busy'
+);
+
+-- 12d. complete с ВЕРНЫМ claim_token переводит в 'completed' навсегда.
+select is(
+  (select public.complete_telegram_update(700, (select token from test_claim_capture where label = 'new-claim'))),
+  true,
+  'complete с верным claim_token: true'
+);
+select is(
+  (select result from public.claim_telegram_update(700)),
+  'completed',
+  'после complete: claim того же update_id снова -> completed (навсегда, не перезахватывается)'
+);
+select is(
+  (select public.complete_telegram_update(700, (select token from test_claim_capture where label = 'new-claim'))),
+  false,
+  'повторный complete того же (уже completed) claim_token: false (status уже не processing)'
+);
+
+-- 12e. release с ВЕРНЫМ claim_token после обычной (пойманной в JS) ошибки
+-- разрешает немедленный re-claim (retry Telegram при 5xx) — без ожидания
+-- истечения исходного lease.
+insert into test_claim_capture
+  select 'release-before', claim_token from public.claim_telegram_update(701);
+
+select is(
+  (select public.release_telegram_update(701, (select token from test_claim_capture where label = 'release-before'))),
+  true,
+  'release с верным claim_token: true'
+);
+
+insert into test_claim_capture
+  select 'release-after', claim_token from public.claim_telegram_update(701);
+
+select isnt(
+  (select token from test_claim_capture where label = 'release-before'),
+  (select token from test_claim_capture where label = 'release-after'),
+  're-claim после release выдаёт НОВЫЙ claim_token, отличный от освобождённого'
+);
+select is(
+  (select public.release_telegram_update(701, (select token from test_claim_capture where label = 'release-before'))),
+  false,
+  'старый (уже использованный) claim_token не может повторно release перезахваченный claim'
+);
+select is(
+  (select public.complete_telegram_update(701, (select token from test_claim_capture where label = 'release-before'))),
+  false,
+  'старый (уже использованный) claim_token не может complete перезахваченный claim'
+);
+select is(
+  (select public.complete_telegram_update(701, (select token from test_claim_capture where label = 'release-after'))),
+  true,
+  'актуальный (после re-claim) claim_token успешно завершает claim'
+);
+
+-- 12f. Авария (SIGKILL/serverless timeout): ни complete, ни release не
+-- вызываются вовсе. Симулируем истечение lease напрямую (locked_until в
+-- прошлом) — теперь это возможно, потому что service_role получил UPDATE
+-- на эту таблицу именно для lease-модели (см. раздел GRANT выше). Update
+-- НЕ должен быть похоронен навсегда: перезахват обязан пройти с новым
+-- claim_token, а старый (осиротевший) — не может ни complete, ни release
+-- перезахваченный claim.
+insert into test_claim_capture
+  select 'crash-before', claim_token from public.claim_telegram_update(702);
+
+update public.processed_telegram_updates
+   set locked_until = now() - interval '1 second'
+ where telegram_update_id = 702;
+
+insert into test_claim_capture
+  select 'crash-after', claim_token from public.claim_telegram_update(702);
+
+select isnt(
+  (select token from test_claim_capture where label = 'crash-before'),
+  (select token from test_claim_capture where label = 'crash-after'),
+  'перезахват просроченного (аварийно "зависшего") lease выдаёт НОВЫЙ claim_token'
+);
+select is(
+  (select public.complete_telegram_update(702, (select token from test_claim_capture where label = 'crash-before'))),
+  false,
+  '"осиротевший" (аварийный) claim_token НЕ может complete claim, перезахваченный другим воркером'
+);
+select is(
+  (select public.release_telegram_update(702, (select token from test_claim_capture where label = 'crash-before'))),
+  false,
+  '"осиротевший" (аварийный) claim_token НЕ может release claim, перезахваченный другим воркером'
+);
+select is(
+  (select public.complete_telegram_update(702, (select token from test_claim_capture where label = 'crash-after'))),
+  true,
+  'актуальный (после перезахвата) claim_token успешно завершает claim — update не похоронен навсегда'
+);
+select is(
+  (select result from public.claim_telegram_update(702)),
+  'completed',
+  'update, переживший симулированную аварию, в итоге корректно завершён (completed)'
 );
 
 -- 13. Одно и то же напоминание нельзя запланировать дважды для одной

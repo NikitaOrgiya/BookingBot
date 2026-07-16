@@ -29,12 +29,40 @@ function isoDatePlusDays(days: number): string {
   return base.toISOString().slice(0, 10);
 }
 
+/** Выполняет запрос и возвращает его SQLSTATE-ошибку (а не успешный
+ * результат) — для тестов, которые намеренно провоцируют отказ и хотят
+ * проверить именно код ошибки несколькими последующими assert'ами. */
+async function queryExpectingError(
+  client: Client,
+  sql: string,
+  params: unknown[]
+): Promise<{ code?: string }> {
+  try {
+    await client.query(sql, params);
+  } catch (err) {
+    return err as { code?: string };
+  }
+  throw new Error(`Ожидалась ошибка запроса, но он выполнился успешно: ${sql}`);
+}
+
 describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идемпотентность, владение", () => {
   let setup: Client;
   let svc: Client;
 
   const serviceId = randomUUID();
   const workingHoursIds: string[] = [];
+
+  // Диапазон telegram_update_id, зарезервированный для тестов
+  // claim/complete/release ниже — достаточно широкий (100000), чтобы не
+  // пересекаться ни с одним другим update_id, используемым в этом файле
+  // (все они образуются от Date.now() с маленькими смещениями). Одна
+  // общая afterAll-очистка по диапазону вместо cleanup в каждом тесте.
+  const claimTestBaseId = Date.now() * 1000;
+  let claimTestCounter = 0;
+  function nextClaimTestId(): number {
+    claimTestCounter += 1;
+    return claimTestBaseId + claimTestCounter;
+  }
 
   let savedSettings: {
     booking_horizon_days: number;
@@ -85,6 +113,11 @@ describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идем�
   });
 
   afterAll(async () => {
+    await setup.query(
+      `delete from public.processed_telegram_updates
+        where telegram_update_id >= $1 and telegram_update_id < $1 + 100000`,
+      [claimTestBaseId]
+    );
     await setup.query(`delete from public.working_hours where id = any($1)`, [
       workingHoursIds,
     ]);
@@ -233,28 +266,88 @@ describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идем�
     });
   });
 
-  describe("processed_telegram_updates: claim/release идемпотентность", () => {
-    it("повторная доставка одного update_id: второй claim получает конфликт первичного ключа (23505)", async () => {
-      const updateId = Date.now();
-      await svc.query(
-        `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
+  describe("processed_telegram_updates: crash-safe lease-модель claim/complete/release", () => {
+    // Симулирует "аварию" (процесс убит между claim и complete/release):
+    // клэймим с намеренно коротким lease (1с), ждём его истечения и
+    // перезахватываем — ровно то поведение, которое в проде происходит
+    // само по себе через locked_until, без искусственного ожидания.
+    async function claimWithExpiredLease(
+      updateId: number
+    ): Promise<{ staleToken: string; freshResult: string; freshToken: string | null }> {
+      const { rows: first } = await svc.query(
+        `select * from public.claim_telegram_update($1, $2)`,
+        [updateId, 1]
+      );
+      const staleToken = first[0].claim_token as string;
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      const { rows: second } = await svc.query(
+        `select * from public.claim_telegram_update($1, $2)`,
+        [updateId, 120]
+      );
+      return {
+        staleToken,
+        freshResult: second[0].result,
+        freshToken: second[0].claim_token,
+      };
+    }
+
+    it("новый claim: result = claimed, claim_token не пуст", async () => {
+      const updateId = nextClaimTestId();
+      const { rows } = await svc.query(
+        `select * from public.claim_telegram_update($1)`,
         [updateId]
       );
-
-      await expect(
-        svc.query(
-          `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
-          [updateId]
-        )
-      ).rejects.toMatchObject({ code: "23505" });
-
-      await setup.query(`delete from public.processed_telegram_updates where telegram_update_id = $1`, [
-        updateId,
-      ]);
+      expect(rows[0].result).toBe("claimed");
+      expect(rows[0].claim_token).toBeTruthy();
     });
 
-    it("параллельная обработка одного update_id: ровно одна попытка claim успешна", async () => {
-      const updateId = Date.now() + 1;
+    it("completed duplicate: после complete повторный claim того же update_id -> completed, без claim_token", async () => {
+      const updateId = nextClaimTestId();
+      const { rows: claimed } = await svc.query(
+        `select * from public.claim_telegram_update($1)`,
+        [updateId]
+      );
+      const { rows: completed } = await svc.query(
+        `select public.complete_telegram_update($1, $2) as ok`,
+        [updateId, claimed[0].claim_token]
+      );
+      expect(completed[0].ok).toBe(true);
+
+      const { rows: reclaim } = await svc.query(
+        `select * from public.claim_telegram_update($1)`,
+        [updateId]
+      );
+      expect(reclaim[0].result).toBe("completed");
+      expect(reclaim[0].claim_token).toBeNull();
+    });
+
+    it("активный busy claim: повторный claim до истечения lease -> busy, без claim_token", async () => {
+      const updateId = nextClaimTestId();
+      await svc.query(`select * from public.claim_telegram_update($1)`, [updateId]);
+
+      const { rows } = await svc.query(
+        `select * from public.claim_telegram_update($1)`,
+        [updateId]
+      );
+      expect(rows[0].result).toBe("busy");
+      expect(rows[0].claim_token).toBeNull();
+    });
+
+    it("busy обязан оставаться retryable на HTTP-уровне: webhook-handler.ts возвращает 503 (см. tests/unit/telegram-webhook-handler.test.ts) — здесь только сам факт busy, а не 'уже обработано'", async () => {
+      const updateId = nextClaimTestId();
+      await svc.query(`select * from public.claim_telegram_update($1)`, [updateId]);
+      const { rows } = await svc.query(
+        `select * from public.claim_telegram_update($1)`,
+        [updateId]
+      );
+      // busy != completed: повторная доставка НЕ должна трактоваться как
+      // "уже успешно обработано" (что оправдывало бы 2xx).
+      expect(rows[0].result).not.toBe("completed");
+      expect(rows[0].result).toBe("busy");
+    });
+
+    it("два параллельных одинаковых update_id: ровно один claim успешен (claimed), другой видит busy — бизнес-действие выполняется один раз", async () => {
+      const updateId = nextClaimTestId();
       const clientA = new Client({ connectionString });
       const clientB = new Client({ connectionString });
       await clientA.connect();
@@ -263,57 +356,86 @@ describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идем�
       await clientB.query("set role service_role");
 
       try {
-        const insert = (client: Client) =>
-          client.query(
-            `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
-            [updateId]
-          );
+        const claim = (client: Client) =>
+          client.query(`select * from public.claim_telegram_update($1)`, [updateId]);
 
-        const results = await Promise.allSettled([insert(clientA), insert(clientB)]);
-        const fulfilled = results.filter((r) => r.status === "fulfilled");
-        const rejected = results.filter((r) => r.status === "rejected");
+        const [resA, resB] = await Promise.all([claim(clientA), claim(clientB)]);
+        const results = [resA.rows[0].result, resB.rows[0].result].sort();
 
-        expect(fulfilled).toHaveLength(1);
-        expect(rejected).toHaveLength(1);
-        expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
-          code: "23505",
-        });
+        expect(results).toEqual(["busy", "claimed"]);
       } finally {
         await clientA.end();
         await clientB.end();
-        await setup.query(
-          `delete from public.processed_telegram_updates where telegram_update_id = $1`,
-          [updateId]
-        );
       }
     });
 
-    it("release (DELETE после неудачной обработки) затем повторный claim снова успешен", async () => {
-      const updateId = Date.now() + 2;
-      await svc.query(
-        `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
-        [updateId]
-      );
-      // Симулируем releaseTelegramUpdate после ошибки в обработке.
-      await svc.query(
-        `delete from public.processed_telegram_updates where telegram_update_id = $1`,
-        [updateId]
-      );
-      // Следующая доставка того же update_id должна получить новую попытку.
-      const { rowCount } = await svc.query(
-        `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
-        [updateId]
-      );
-      expect(rowCount).toBe(1);
+    it("claim без complete/release, истечение lease -> повторный claim перезахватывает с НОВЫМ claim_token", async () => {
+      const updateId = nextClaimTestId();
+      const { staleToken, freshResult, freshToken } = await claimWithExpiredLease(updateId);
 
-      await setup.query(`delete from public.processed_telegram_updates where telegram_update_id = $1`, [
-        updateId,
-      ]);
+      expect(freshResult).toBe("claimed");
+      expect(freshToken).not.toBe(staleToken);
     });
 
-    it("успешно обработанный update_id никогда не освобождается: повтор доставки не повторяет бизнес-действие", async () => {
+    it("старый claim_token НЕ может complete claim, перезахваченный другим воркером", async () => {
+      const updateId = nextClaimTestId();
+      const { staleToken } = await claimWithExpiredLease(updateId);
+
+      const { rows } = await svc.query(
+        `select public.complete_telegram_update($1, $2) as ok`,
+        [updateId, staleToken]
+      );
+      expect(rows[0].ok).toBe(false);
+    });
+
+    it("старый claim_token НЕ может release claim, перезахваченный другим воркером", async () => {
+      const updateId = nextClaimTestId();
+      const { staleToken } = await claimWithExpiredLease(updateId);
+
+      const { rows } = await svc.query(
+        `select public.release_telegram_update($1, $2) as ok`,
+        [updateId, staleToken]
+      );
+      expect(rows[0].ok).toBe(false);
+    });
+
+    it("обычная ошибка: release с верным claim_token -> следующий claim немедленно успешен с НОВЫМ токеном (без ожидания lease)", async () => {
+      const updateId = nextClaimTestId();
+      const { rows: first } = await svc.query(
+        `select * from public.claim_telegram_update($1)`,
+        [updateId]
+      );
+      const token = first[0].claim_token;
+
+      const { rows: released } = await svc.query(
+        `select public.release_telegram_update($1, $2) as ok`,
+        [updateId, token]
+      );
+      expect(released[0].ok).toBe(true);
+
+      const { rows: second } = await svc.query(
+        `select * from public.claim_telegram_update($1)`,
+        [updateId]
+      );
+      expect(second[0].result).toBe("claimed");
+      expect(second[0].claim_token).not.toBe(token);
+    });
+
+    it("авария после claim (ни complete, ни release не вызваны) не хоронит update навсегда: после истечения lease его снова можно заявить и завершить", async () => {
+      const updateId = nextClaimTestId();
+      const { freshResult, freshToken } = await claimWithExpiredLease(updateId);
+      expect(freshResult).toBe("claimed");
+
+      const { rows: completed } = await svc.query(
+        `select public.complete_telegram_update($1, $2) as ok`,
+        [updateId, freshToken]
+      );
+      expect(completed[0].ok).toBe(true);
+    });
+
+    it("успешно обработанный (completed) update_id никогда не освобождается: повтор доставки не повторяет бизнес-действие (reserve_appointment)", async () => {
       const telegramUserId = `83${Date.now()}`;
-      const updateId = Date.now() + 3;
+      const updateId = nextClaimTestId();
       const startAt = `${isoDatePlusDays(15)}T10:00:00+03:00`;
 
       await setup.query(
@@ -322,9 +444,9 @@ describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идем�
       );
 
       try {
-        // Первая доставка confirm-колбэка: claim -> reserve_appointment.
-        await svc.query(
-          `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
+        // Первая доставка confirm-колбэка: claim -> reserve_appointment -> complete.
+        const { rows: claimed } = await svc.query(
+          `select * from public.claim_telegram_update($1)`,
           [updateId]
         );
         const { rows: reserved } = await svc.query(
@@ -332,17 +454,20 @@ describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идем�
           [telegramUserId, serviceId, startAt, null]
         );
         expect(reserved).toHaveLength(1);
+        await svc.query(`select public.complete_telegram_update($1, $2)`, [
+          updateId,
+          claimed[0].claim_token,
+        ]);
 
         // Повторная доставка ТОГО ЖЕ update_id (Telegram не получил 200 с
-        // первого раза и повторяет доставку) — claim обязан провалиться,
-        // поэтому reserve_appointment здесь заведомо не должен вызываться
-        // повторно кодом бота. Проверяем именно это условие claim'а.
-        await expect(
-          svc.query(
-            `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
-            [updateId]
-          )
-        ).rejects.toMatchObject({ code: "23505" });
+        // первого раза) -> claim обязан вернуть completed, а не claimed —
+        // поэтому reserve_appointment не должен вызываться повторно кодом
+        // бота. Проверяем именно это условие claim'а.
+        const { rows: reclaim } = await svc.query(
+          `select * from public.claim_telegram_update($1)`,
+          [updateId]
+        );
+        expect(reclaim[0].result).toBe("completed");
 
         const { rows: appointments } = await setup.query(
           `select count(*)::int as count from public.appointments
@@ -360,15 +485,12 @@ describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идем�
         await setup.query(`delete from public.telegram_users where telegram_user_id = $1`, [
           telegramUserId,
         ]);
-        await setup.query(`delete from public.processed_telegram_updates where telegram_update_id = $1`, [
-          updateId,
-        ]);
       }
     });
 
-    it("успешная отмена не повторяется при повторной доставке update_id колбэка отмены", async () => {
+    it("успешная отмена (completed) не повторяется при повторной доставке update_id колбэка отмены", async () => {
       const telegramUserId = `84${Date.now()}`;
-      const updateId = Date.now() + 4;
+      const updateId = nextClaimTestId();
       const startAt = `${isoDatePlusDays(16)}T10:00:00+03:00`;
 
       await setup.query(
@@ -382,8 +504,8 @@ describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идем�
       const appointmentId = reserved[0].id;
 
       try {
-        await svc.query(
-          `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
+        const { rows: claimed } = await svc.query(
+          `select * from public.claim_telegram_update($1)`,
           [updateId]
         );
         const { rows: cancelled } = await svc.query(
@@ -391,25 +513,177 @@ describe.skipIf(!connectionString)("Telegram-бот: booking_sessions, идем�
           [appointmentId, telegramUserId, null]
         );
         expect(cancelled[0].status).toBe("cancelled");
+        await svc.query(`select public.complete_telegram_update($1, $2)`, [
+          updateId,
+          claimed[0].claim_token,
+        ]);
 
-        // Повторная доставка того же update_id колбэка отмены — claim
-        // должен провалиться, cancel_appointment_by_client не вызывается
+        // Повторная доставка того же update_id колбэка отмены -> claim
+        // возвращает completed, cancel_appointment_by_client не вызывается
         // повторно (что и предотвращает попадание в ALREADY_CANCELLED из-за
         // самой повторной доставки, а не из-за отдельного действия клиента).
-        await expect(
-          svc.query(
-            `insert into public.processed_telegram_updates (telegram_update_id) values ($1)`,
-            [updateId]
-          )
-        ).rejects.toMatchObject({ code: "23505" });
+        const { rows: reclaim } = await svc.query(
+          `select * from public.claim_telegram_update($1)`,
+          [updateId]
+        );
+        expect(reclaim[0].result).toBe("completed");
       } finally {
         await setup.query(`delete from public.appointments where id = $1`, [appointmentId]);
         await setup.query(`delete from public.telegram_users where telegram_user_id = $1`, [
           telegramUserId,
         ]);
-        await setup.query(`delete from public.processed_telegram_updates where telegram_update_id = $1`, [
+      }
+    });
+  });
+
+  describe("Бизнес-эффекты повторной доставки после аварии ДО complete_telegram_update", () => {
+    it("appointment создан, но complete_telegram_update не вызван (авария) -> повторная доставка confirm НЕ создаёт дубль; своя запись обнаружима тем же запросом, что использует getOwnConfirmedAppointmentBySlot", async () => {
+      const telegramUserId = `90${Date.now()}`;
+      const updateId = nextClaimTestId();
+      const startAt = `${isoDatePlusDays(17)}T10:00:00+03:00`;
+
+      await setup.query(
+        `insert into public.telegram_users (telegram_user_id) values ($1)`,
+        [telegramUserId]
+      );
+      const { rows: userRows } = await setup.query(
+        `select id from public.telegram_users where telegram_user_id = $1`,
+        [telegramUserId]
+      );
+      const userRowId = userRows[0].id;
+
+      try {
+        // Первая доставка: claim (короткий lease) -> reserve_appointment
+        // реально создаёт запись -> АВАРИЯ (SIGKILL) до complete_telegram_update.
+        await svc.query(`select * from public.claim_telegram_update($1, $2)`, [
           updateId,
+          1,
         ]);
+        const { rows: reserved } = await svc.query(
+          `select * from public.reserve_appointment($1, $2, $3, $4)`,
+          [telegramUserId, serviceId, startAt, null]
+        );
+        expect(reserved).toHaveLength(1);
+        const appointmentId = reserved[0].id;
+        // complete_telegram_update НЕ вызывается — процесс "погиб" здесь.
+
+        // Lease истекает, Telegram повторно доставляет тот же update_id.
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        const { rows: reclaimed } = await svc.query(
+          `select * from public.claim_telegram_update($1)`,
+          [updateId]
+        );
+        expect(reclaimed[0].result).toBe("claimed"); // update не похоронен навсегда
+
+        // Повторный вызов reserve_appointment на тот же слот падает
+        // (exclusion constraint) — это и есть путь, которым onConfirm в
+        // lib/telegram/handlers/callbacks.ts получает SLOT_TAKEN.
+        const err = await queryExpectingError(
+          svc,
+          `select * from public.reserve_appointment($1, $2, $3, $4)`,
+          [telegramUserId, serviceId, startAt, null]
+        );
+        expect(["23P01", "40P01"]).toContain(err.code);
+
+        // Прикладной слой (см. getOwnConfirmedAppointmentBySlot в
+        // lib/telegram/repositories/appointments.ts) обязан находить СВОЮ
+        // уже созданную запись по тому же запросу — именно это позволяет
+        // onConfirm показать идемпотентный успех вместо ложного SLOT_TAKEN.
+        const { rows: own } = await setup.query(
+          `select id from public.appointments
+            where telegram_user_id = $1 and service_id = $2 and start_at = $3 and status = 'confirmed'`,
+          [userRowId, serviceId, startAt]
+        );
+        expect(own).toHaveLength(1);
+        expect(own[0].id).toBe(appointmentId);
+
+        // В БД ровно одна запись на этот слот — повтор не создал дубль.
+        const { rows: count } = await setup.query(
+          `select count(*)::int as count from public.appointments where telegram_user_id = $1`,
+          [userRowId]
+        );
+        expect(count[0].count).toBe(1);
+
+        await svc.query(`select public.complete_telegram_update($1, $2)`, [
+          updateId,
+          reclaimed[0].claim_token,
+        ]);
+      } finally {
+        await setup.query(`delete from public.appointments where telegram_user_id = $1`, [
+          userRowId,
+        ]);
+        await setup.query(`delete from public.telegram_users where telegram_user_id = $1`, [
+          telegramUserId,
+        ]);
+      }
+    });
+
+    it("отмена выполнена, но авария до complete_telegram_update -> повторная отмена безопасно завершается (ALREADY_CANCELLED), владение по-прежнему проверяется", async () => {
+      const telegramUserId = `91${Date.now()}`;
+      const otherTelegramUserId = `92${Date.now()}`;
+      const updateId = nextClaimTestId();
+      const startAt = `${isoDatePlusDays(18)}T10:00:00+03:00`;
+
+      await setup.query(
+        `insert into public.telegram_users (telegram_user_id) values ($1), ($2)`,
+        [telegramUserId, otherTelegramUserId]
+      );
+      const { rows: reserved } = await setup.query(
+        `select * from public.reserve_appointment($1, $2, $3, $4)`,
+        [telegramUserId, serviceId, startAt, null]
+      );
+      const appointmentId = reserved[0].id;
+
+      try {
+        await svc.query(`select * from public.claim_telegram_update($1, $2)`, [
+          updateId,
+          1,
+        ]);
+        const { rows: cancelled } = await svc.query(
+          `select * from public.cancel_appointment_by_client($1, $2, $3)`,
+          [appointmentId, telegramUserId, null]
+        );
+        expect(cancelled[0].status).toBe("cancelled");
+        // complete_telegram_update НЕ вызывается — авария здесь.
+
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        const { rows: reclaimed } = await svc.query(
+          `select * from public.claim_telegram_update($1)`,
+          [updateId]
+        );
+        expect(reclaimed[0].result).toBe("claimed");
+
+        // Повторная доставка отмены -> cancel_appointment_by_client снова
+        // вызывается кодом бота (claim не знал, что действие уже
+        // выполнено) -> ALREADY_CANCELLED (PB012), НЕ ошибка владения и НЕ
+        // повторное списание/изменение записи. onCancelConfirmed трактует
+        // именно этот код как безопасный идемпотентный успех.
+        const err = await queryExpectingError(
+          svc,
+          `select * from public.cancel_appointment_by_client($1, $2, $3)`,
+          [appointmentId, telegramUserId, null]
+        );
+        expect(err.code).toBe("PB012");
+
+        await svc.query(`select public.complete_telegram_update($1, $2)`, [
+          updateId,
+          reclaimed[0].claim_token,
+        ]);
+
+        // Чужая запись по-прежнему не раскрывается и не изменяется через
+        // тот же путь (владение проверяется ДО статуса в самой функции).
+        const otherErr = await queryExpectingError(
+          svc,
+          `select * from public.cancel_appointment_by_client($1, $2, $3)`,
+          [appointmentId, otherTelegramUserId, null]
+        );
+        expect(otherErr.code).toBe("PB010");
+      } finally {
+        await setup.query(`delete from public.appointments where id = $1`, [appointmentId]);
+        await setup.query(
+          `delete from public.telegram_users where telegram_user_id in ($1, $2)`,
+          [telegramUserId, otherTelegramUserId]
+        );
       }
     });
   });

@@ -90,3 +90,45 @@ export async function getOwnAppointmentById(
 
   return data ? mapAppointmentRow(data) : null;
 }
+
+/**
+ * Своя confirmed-запись на ту же услугу и то же начало — используется для
+ * идемпотентной обработки повторной доставки confirm-колбэка (Этап 3,
+ * корректирующий аудит): если reserveAppointment вернул SLOT_TAKEN, это
+ * может означать не "слот занял кто-то другой", а "этот же клиент уже
+ * успешно забронировал этот же слот при предыдущей (не дошедшей до
+ * complete_telegram_update) попытке" — окно между "appointment создан" и
+ * "процесс успел ответить/завершить claim". В этом случае повторная
+ * доставка не должна показывать пользователю ложный "слот занят": нужно
+ * показать тот же успешный результат.
+ *
+ * Возвращает null и для "нет такой записи", и для "есть, но чужая" — как
+ * и getOwnAppointmentById, эти два случая не должны быть различимы отсюда;
+ * единственный вызывающий код (onConfirm) уже проверил service/start
+ * против собственной сессии клиента до вызова этой функции.
+ */
+export async function getOwnConfirmedAppointmentBySlot(
+  telegramUserRowId: string,
+  serviceId: string,
+  startAt: string
+): Promise<Appointment | null> {
+  const supabase = getServiceSupabaseClient();
+
+  const { data, error } = await supabase
+    .from("appointments")
+    .select("*")
+    .eq("telegram_user_id", telegramUserRowId)
+    .eq("service_id", serviceId)
+    .eq("start_at", startAt)
+    .eq("status", "confirmed")
+    .maybeSingle<AppointmentRow>();
+
+  if (error) {
+    throw new Error(
+      `Не удалось проверить существующую запись на этот слот: ${error.message}`,
+      { cause: error }
+    );
+  }
+
+  return data ? mapAppointmentRow(data) : null;
+}

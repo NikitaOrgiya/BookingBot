@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BotContext } from "@/lib/telegram/context";
 import { encodeCallbackData } from "@/lib/telegram/callback-data";
 import { IDLE_SESSION_STATE } from "@/lib/telegram/repositories/booking-sessions";
-import { STALE_BUTTON_MESSAGE } from "@/lib/telegram/messages";
+import { CANCEL_SUCCESS_MESSAGE, STALE_BUTTON_MESSAGE } from "@/lib/telegram/messages";
 import { BookingError } from "@/lib/booking/errors";
 
 /**
@@ -33,6 +33,7 @@ vi.mock("@/lib/telegram/repositories/appointments", () => ({
   MY_BOOKINGS_PAGE_SIZE: 5,
   listUpcomingAppointments: vi.fn(),
   getOwnAppointmentById: vi.fn(),
+  getOwnConfirmedAppointmentBySlot: vi.fn(),
 }));
 vi.mock("@/lib/booking", async () => {
   const actual =
@@ -48,8 +49,12 @@ vi.mock("@/lib/booking", async () => {
 import { getBookingSession, setBookingSession, clearBookingSession } from "@/lib/telegram/repositories/booking-sessions";
 import { getServiceById, listActiveServices } from "@/lib/telegram/repositories/services";
 import { getBusinessSettings } from "@/lib/telegram/repositories/business-settings";
-import { getOwnAppointmentById, listUpcomingAppointments } from "@/lib/telegram/repositories/appointments";
-import { getAvailableSlots, reserveAppointment } from "@/lib/booking";
+import {
+  getOwnAppointmentById,
+  getOwnConfirmedAppointmentBySlot,
+  listUpcomingAppointments,
+} from "@/lib/telegram/repositories/appointments";
+import { getAvailableSlots, reserveAppointment, cancelAppointmentByClient } from "@/lib/booking";
 import { handleCallbackQuery } from "@/lib/telegram/handlers/callbacks";
 
 const BUSINESS_SETTINGS = { timezone: "Europe/Moscow", bookingHorizonDays: 14 };
@@ -198,7 +203,7 @@ describe("handleCallbackQuery: подтверждение брони (cf)", () =
     expect(clearBookingSession).toHaveBeenCalledWith("12345");
   });
 
-  it("SLOT_TAKEN при подтверждении возвращает к выбору времени со свежими слотами", async () => {
+  it("SLOT_TAKEN при подтверждении возвращает к выбору времени со свежими слотами (слот реально занял кто-то другой)", async () => {
     const ctx = makeCtx(encodeCallbackData({ action: "cf", startAt }));
     vi.mocked(getBookingSession).mockResolvedValue({
       step: "confirming",
@@ -207,12 +212,18 @@ describe("handleCallbackQuery: подтверждение брони (cf)", () =
       selectedLocalTime: "12:00:00",
     });
     vi.mocked(reserveAppointment).mockRejectedValue(new BookingError("SLOT_TAKEN"));
+    vi.mocked(getOwnConfirmedAppointmentBySlot).mockResolvedValue(null);
     vi.mocked(getAvailableSlots).mockResolvedValue([
       { startAt: "2026-07-20T10:00:00+00:00", endAt: "2026-07-20T11:00:00+00:00" },
     ]);
 
     await handleCallbackQuery(ctx);
 
+    expect(getOwnConfirmedAppointmentBySlot).toHaveBeenCalledWith(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      SERVICE_ID,
+      startAt
+    );
     expect(setBookingSession).toHaveBeenCalledWith(
       "12345",
       expect.objectContaining({ step: "choosing_slot", selectedLocalTime: null })
@@ -221,6 +232,50 @@ describe("handleCallbackQuery: подтверждение брони (cf)", () =
       expect.objectContaining({ serviceId: SERVICE_ID })
     );
     expect(ctx.answerCallbackQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("SLOT_TAKEN, но своя confirmed-запись на тот же service/start уже существует -> идемпотентный успех, а не ложный SLOT_TAKEN (повтор доставки confirm-колбэка после аварии до complete_telegram_update)", async () => {
+    const ctx = makeCtx(encodeCallbackData({ action: "cf", startAt }));
+    vi.mocked(getBookingSession).mockResolvedValue({
+      step: "confirming",
+      selectedServiceId: SERVICE_ID,
+      selectedDate: "2026-07-20",
+      selectedLocalTime: "12:00:00",
+    });
+    vi.mocked(reserveAppointment).mockRejectedValue(new BookingError("SLOT_TAKEN"));
+    const existingAppointment = {
+      id: APPOINTMENT_ID,
+      telegramUserRowId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      serviceId: SERVICE_ID,
+      serviceName: "Стрижка",
+      durationMinutes: 60,
+      priceCents: 200000,
+      startAt,
+      endAt: "2026-07-20T10:00:00+00:00",
+      status: "confirmed" as const,
+      clientNote: null,
+      cancelledAt: null,
+      cancelReason: null,
+      createdAt: startAt,
+      updatedAt: startAt,
+    };
+    vi.mocked(getOwnConfirmedAppointmentBySlot).mockResolvedValue(existingAppointment);
+
+    await handleCallbackQuery(ctx);
+
+    expect(getOwnConfirmedAppointmentBySlot).toHaveBeenCalledWith(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      SERVICE_ID,
+      startAt
+    );
+    // Идемпотентный успех: сессия очищена, свежие слоты НЕ запрашивались,
+    // пользователь не увидел "слот занят" за свою же запись.
+    expect(clearBookingSession).toHaveBeenCalledWith("12345");
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(ctx.editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining("подтверждена"),
+      expect.anything()
+    );
   });
 
   it("успешное бронирование очищает booking_session", async () => {
@@ -267,5 +322,67 @@ describe("handleCallbackQuery: отмена своей записи vs подд�
       OTHER_USER_APPOINTMENT_ID
     );
     expect(listUpcomingAppointments).toHaveBeenCalled();
+  });
+});
+
+describe("handleCallbackQuery: подтверждение отмены (cac) — идемпотентный повтор", () => {
+  it("успешная отмена показывает CANCEL_SUCCESS_MESSAGE", async () => {
+    const ctx = makeCtx(encodeCallbackData({ action: "cac", appointmentId: APPOINTMENT_ID }));
+    vi.mocked(cancelAppointmentByClient).mockResolvedValue({
+      id: APPOINTMENT_ID,
+      telegramUserRowId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      serviceId: SERVICE_ID,
+      serviceName: "Стрижка",
+      durationMinutes: 60,
+      priceCents: 200000,
+      startAt: "2026-07-20T09:00:00+00:00",
+      endAt: "2026-07-20T10:00:00+00:00",
+      status: "cancelled",
+      clientNote: null,
+      cancelledAt: "2026-07-20T08:00:00+00:00",
+      cancelReason: null,
+      createdAt: "2026-07-19T00:00:00+00:00",
+      updatedAt: "2026-07-20T08:00:00+00:00",
+    });
+
+    await handleCallbackQuery(ctx);
+
+    expect(ctx.editMessageText).toHaveBeenCalledWith(
+      CANCEL_SUCCESS_MESSAGE,
+      expect.anything()
+    );
+  });
+
+  it("ALREADY_CANCELLED (повторная доставка cac после аварии до ответа Telegram) -> безопасный идемпотентный успех, а не ошибка", async () => {
+    const ctx = makeCtx(encodeCallbackData({ action: "cac", appointmentId: APPOINTMENT_ID }));
+    vi.mocked(cancelAppointmentByClient).mockRejectedValue(
+      new BookingError("ALREADY_CANCELLED")
+    );
+
+    await handleCallbackQuery(ctx);
+
+    // Ровно CANCEL_SUCCESS_MESSAGE, а НЕ
+    // formatBookingErrorMessage("ALREADY_CANCELLED") ("Эта запись уже
+    // отменена.") — оба текста содержат слово "отменена", поэтому здесь
+    // важно точное сравнение, а не подстрока.
+    expect(ctx.editMessageText).toHaveBeenCalledWith(
+      CANCEL_SUCCESS_MESSAGE,
+      expect.anything()
+    );
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("APPOINTMENT_NOT_OWNED по-прежнему показывает обычную ошибку, а не идемпотентный успех — чужая запись не подменяется", async () => {
+    const ctx = makeCtx(encodeCallbackData({ action: "cac", appointmentId: OTHER_USER_APPOINTMENT_ID }));
+    vi.mocked(cancelAppointmentByClient).mockRejectedValue(
+      new BookingError("APPOINTMENT_NOT_OWNED")
+    );
+
+    await handleCallbackQuery(ctx);
+
+    expect(ctx.editMessageText).not.toHaveBeenCalledWith(
+      CANCEL_SUCCESS_MESSAGE,
+      expect.anything()
+    );
   });
 });
