@@ -25,13 +25,21 @@ const envSchema = z.object({
   NEXT_PUBLIC_SUPABASE_URL: z
     .string({ message: "NEXT_PUBLIC_SUPABASE_URL обязателен" })
     .url("NEXT_PUBLIC_SUPABASE_URL должен быть корректным URL"),
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: z
-    .string({ message: "NEXT_PUBLIC_SUPABASE_ANON_KEY обязателен" })
-    .min(1, "NEXT_PUBLIC_SUPABASE_ANON_KEY не может быть пустым"),
+  // Современная схема ключей Supabase: publishable-ключ (sb_publishable_...)
+  // заменяет устаревший anon-ключ. Он низкопривилегированный и может
+  // попадать в браузер — им пользуется только публичный клиент.
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z
+    .string({ message: "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY обязателен" })
+    .min(1, "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY не может быть пустым"),
 
-  SUPABASE_SERVICE_ROLE_KEY: z
-    .string({ message: "SUPABASE_SERVICE_ROLE_KEY обязателен" })
-    .min(1, "SUPABASE_SERVICE_ROLE_KEY не может быть пустым"),
+  // Secret-ключ (sb_secret_...) заменяет устаревший service_role-ключ.
+  // Он обходит RLS и обязан оставаться строго серверным: используется
+  // только привилегированным клиентом в lib/supabase/server-client.ts,
+  // который импортирует "server-only" и физически не может попасть в
+  // клиентский бандл.
+  SUPABASE_SECRET_KEY: z
+    .string({ message: "SUPABASE_SECRET_KEY обязателен" })
+    .min(1, "SUPABASE_SECRET_KEY не может быть пустым"),
 
   TELEGRAM_BOT_TOKEN: z
     .string({ message: "TELEGRAM_BOT_TOKEN обязателен" })

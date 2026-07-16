@@ -4,8 +4,8 @@ import { parseEnv } from "@/lib/env";
 const validEnv = {
   NEXT_PUBLIC_APP_URL: "http://localhost:3000",
   NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key",
-  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_example",
+  SUPABASE_SECRET_KEY: "sb_secret_example",
   TELEGRAM_BOT_TOKEN: "123:abc",
   TELEGRAM_BOT_USERNAME: "bookingbot_test_bot",
   TELEGRAM_WEBHOOK_SECRET: "webhook-secret",
@@ -19,12 +19,35 @@ describe("parseEnv", () => {
     expect(env).toEqual(validEnv);
   });
 
-  it("выбрасывает понятную ошибку при отсутствии обязательной переменной", () => {
-    const withoutServiceRole: Partial<typeof validEnv> = { ...validEnv };
-    delete withoutServiceRole.SUPABASE_SERVICE_ROLE_KEY;
+  it("выбрасывает понятную ошибку при отсутствии секретного ключа", () => {
+    const withoutSecret: Partial<typeof validEnv> = { ...validEnv };
+    delete withoutSecret.SUPABASE_SECRET_KEY;
 
-    expect(() => parseEnv(withoutServiceRole)).toThrowError(
-      /SUPABASE_SERVICE_ROLE_KEY/
+    expect(() => parseEnv(withoutSecret)).toThrowError(/SUPABASE_SECRET_KEY/);
+  });
+
+  it("выбрасывает понятную ошибку при отсутствии publishable-ключа", () => {
+    const withoutPublishable: Partial<typeof validEnv> = { ...validEnv };
+    delete withoutPublishable.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+    expect(() => parseEnv(withoutPublishable)).toThrowError(
+      /NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY/
+    );
+  });
+
+  it("больше не принимает устаревшие имена ключей как обязательные", () => {
+    // Устаревшие NEXT_PUBLIC_SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY
+    // не входят в схему: их наличие/отсутствие не влияет на валидацию.
+    const legacyOnly = {
+      ...validEnv,
+    } as Record<string, string | undefined>;
+    delete legacyOnly.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    legacyOnly.NEXT_PUBLIC_SUPABASE_ANON_KEY = "legacy-anon";
+
+    // Отсутствует современный publishable-ключ → ошибка именно про него,
+    // а не молчаливое принятие устаревшего имени.
+    expect(() => parseEnv(legacyOnly)).toThrowError(
+      /NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY/
     );
   });
 

@@ -35,4 +35,4 @@ echo "==> Устанавливаю расширение pgtap"
 psql -v ON_ERROR_STOP=1 -d "$db_name" -c "create extension if not exists pgtap;"
 
 echo "==> Запускаю pgTAP-тесты"
-pg_prove -d "$db_name" supabase/tests/permissions.test.sql
+pg_prove -d "$db_name" supabase/tests/*.test.sql

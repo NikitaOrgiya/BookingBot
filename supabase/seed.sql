@@ -17,7 +17,8 @@ insert into public.business_settings (
   min_booking_notice_minutes,
   cancellation_notice_minutes,
   reminder_first_minutes,
-  reminder_second_minutes
+  reminder_second_minutes,
+  slot_step_minutes
 ) values (
   1,
   'BookingBot',
@@ -26,6 +27,7 @@ insert into public.business_settings (
   120,
   120,
   1440,
-  120
+  120,
+  15
 )
 on conflict (id) do nothing;
