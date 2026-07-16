@@ -1,6 +1,21 @@
+import path from "node:path";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "."),
+    },
+    // Как в vitest.config.ts: без этого условия пакет "server-only",
+    // который тянут некоторые модули lib/booking и lib/supabase, бросает
+    // ошибку даже в легитимном серверном коде, который здесь тестируется.
+    conditions: ["react-server"],
+  },
+  ssr: {
+    resolve: {
+      conditions: ["react-server"],
+    },
+  },
   test: {
     environment: "node",
     include: ["tests/integration/**/*.test.ts"],
