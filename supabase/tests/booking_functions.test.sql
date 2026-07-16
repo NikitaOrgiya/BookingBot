@@ -22,9 +22,15 @@ select no_plan();
 -- откатывается в конце (rollback).
 -- ---------------------------------------------------------------------
 
+-- 90 дней (а не 365): booking_horizon_days ограничен CHECK-ограничением
+-- business_settings_horizon_range (1..180) из Этапа 1 (миграция
+-- 20260716100300_business_settings.sql, не менялась). Опорная дата ниже —
+-- «сегодня + 30 дней», плюс тест «за горизонтом» использует «+400 дней» от
+-- опорной, что всё равно далеко за пределами 90 — семантика теста не
+-- меняется.
 update public.business_settings
    set timezone = 'Europe/Moscow',
-       booking_horizon_days = 365,
+       booking_horizon_days = 90,
        min_booking_notice_minutes = 0,
        cancellation_notice_minutes = 60,
        slot_step_minutes = 15
@@ -38,6 +44,11 @@ create temporary table tp as
 select
   ((now() at time zone 'Europe/Moscow')::date + 30) as d,
   (extract(isodow from ((now() at time zone 'Europe/Moscow')::date + 30))::int - 1) as wd;
+
+-- Временная таблица принадлежит подключившейся (суперпользовательской) роли;
+-- без явного GRANT последующий "set role service_role" ниже не сможет её
+-- прочитать (BYPASSRLS не отменяет обычную проверку табличных привилегий).
+grant select on tp to service_role;
 
 -- Услуги: обычная 60 мин, неактивная 60 мин, длинная 121 мин.
 insert into public.services (id, name, duration_minutes, price_cents, is_active) values
@@ -133,7 +144,7 @@ select is(
   0,
   'дата за горизонтом бронирования -> 0 слотов'
 );
-update public.business_settings set booking_horizon_days = 365 where id = 1;
+update public.business_settings set booking_horizon_days = 90 where id = 1;
 
 -- =====================================================================
 -- 6. Существующая запись блокирует пересекающиеся слоты. Запись
@@ -256,11 +267,14 @@ reset role;
 
 -- =====================================================================
 -- Подготовка к тестам reserve/cancel: расширяем расписание вечерним
--- интервалом 16:00–20:00, чтобы были свободные слоты, не затрагивая уже
--- проверенные счётчики выше.
+-- интервалом 16:00–21:00 (не 20:00 — до 21:00, чтобы после r_snap
+-- (16:00-17:00), 11a (17:00-18:00) и r_other (18:15-19:15) оставался
+-- свободный час для r_late), не затрагивая уже проверенные счётчики выше
+-- (тесты 1-9 используют только утренний/дневной интервалы, добавленные
+-- раньше).
 -- =====================================================================
 insert into public.working_hours (weekday, start_time, end_time, is_active)
-select (select wd from tp), '16:00', '20:00', true;
+select (select wd from tp), '16:00', '21:00', true;
 
 -- =====================================================================
 -- 11. Атомарное бронирование и snapshot услуги. Snapshot берётся из БД, а
@@ -289,12 +303,13 @@ select is(
 );
 
 -- 11a. service_role реально может выполнить reserve_appointment (свободный
---      слот 16:15).
+--      слот 17:00 — r_snap занял 16:00-17:00, половина 16:15/16:30/16:45
+--      с ним пересекается, 17:00 уже нет).
 set role service_role;
 select lives_ok(
   $$ select public.reserve_appointment(
        111, '00000000-0000-0000-0000-0000000000a1',
-       (select (d::timestamp + time '16:15') at time zone 'Europe/Moscow' from tp),
+       (select (d::timestamp + time '17:00') at time zone 'Europe/Moscow' from tp),
        null) $$,
   'service_role: бронирование свободного слота проходит'
 );
@@ -448,10 +463,12 @@ select throws_ok(
 --     огромный cancellation_notice_minutes, при котором до начала записи
 --     (через ~30 дней) уже «поздно».
 -- =====================================================================
+-- 19:15, не 19:00 — r_other занял 18:15-19:15, старт в 19:00 пересекался бы
+-- с ним (19:00-19:15).
 create temporary table r_late as
 select * from public.reserve_appointment(
   111, '00000000-0000-0000-0000-0000000000a1',
-  (select (d::timestamp + time '19:00') at time zone 'Europe/Moscow' from tp),
+  (select (d::timestamp + time '19:15') at time zone 'Europe/Moscow' from tp),
   null
 );
 update public.business_settings set cancellation_notice_minutes = 576000 where id = 1; -- 400 дней
@@ -463,6 +480,132 @@ select throws_ok(
   'PB011', null, 'отмена позже допустимого срока -> CANCELLATION_TOO_LATE'
 );
 update public.business_settings set cancellation_notice_minutes = 60 where id = 1;
+
+-- =====================================================================
+-- 17. cancel_appointment_by_client разрешает отмену только status =
+--     'confirmed'. completed/no_show -> APPOINTMENT_NOT_CANCELLABLE
+--     (PB013); cancelled -> ALREADY_CANCELLED (PB012, ещё раз — рядом со
+--     всеми остальными статусами, для полноты); confirmed -> успешная
+--     отмена. К этому моменту файла интервал 16:00-20:00 дня tp.d уже
+--     полностью занят предыдущими бронированиями (16:00-17:00, 17:00-18:00,
+--     18:15-19:15, 19:00-20:00) — свободного часа внутри него больше нет,
+--     поэтому используем отдельный день (tp3, +32 дня) со своим рабочим
+--     интервалом, полностью изолированный от остального файла.
+-- =====================================================================
+create temporary table tp3 as
+select
+  ((now() at time zone 'Europe/Moscow')::date + 32) as d,
+  (extract(isodow from ((now() at time zone 'Europe/Moscow')::date + 32))::int - 1) as wd;
+
+insert into public.working_hours (weekday, start_time, end_time, is_active)
+select (select wd from tp3), '09:00', '13:00', true;
+
+create temporary table r_completed as
+select * from public.reserve_appointment(
+  111, '00000000-0000-0000-0000-0000000000a1',
+  (select (d::timestamp + time '09:00') at time zone 'Europe/Moscow' from tp3),
+  null
+);
+update public.appointments set status = 'completed'
+ where id = (select id from r_completed);
+select throws_ok(
+  format(
+    $$ select public.cancel_appointment_by_client(%L, 111, null) $$,
+    (select id from r_completed)
+  ),
+  'PB013', null, 'нельзя отменить completed -> APPOINTMENT_NOT_CANCELLABLE'
+);
+
+create temporary table r_no_show as
+select * from public.reserve_appointment(
+  111, '00000000-0000-0000-0000-0000000000a1',
+  (select (d::timestamp + time '10:00') at time zone 'Europe/Moscow' from tp3),
+  null
+);
+update public.appointments set status = 'no_show'
+ where id = (select id from r_no_show);
+select throws_ok(
+  format(
+    $$ select public.cancel_appointment_by_client(%L, 111, null) $$,
+    (select id from r_no_show)
+  ),
+  'PB013', null, 'нельзя отменить no_show -> APPOINTMENT_NOT_CANCELLABLE'
+);
+
+create temporary table r_confirmable as
+select * from public.reserve_appointment(
+  111, '00000000-0000-0000-0000-0000000000a1',
+  (select (d::timestamp + time '11:00') at time zone 'Europe/Moscow' from tp3),
+  null
+);
+select lives_ok(
+  format(
+    $$ select public.cancel_appointment_by_client(%L, 111, null) $$,
+    (select id from r_confirmable)
+  ),
+  'confirmed успешно отменяется'
+);
+select is(
+  (select status from public.appointments where id = (select id from r_confirmable)),
+  'cancelled',
+  'confirmed после отмены -> статус cancelled'
+);
+-- Повторная отмена уже отменённой -> ALREADY_CANCELLED (см. также 14a).
+select throws_ok(
+  format(
+    $$ select public.cancel_appointment_by_client(%L, 111, null) $$,
+    (select id from r_confirmable)
+  ),
+  'PB012', null, 'cancelled -> ALREADY_CANCELLED'
+);
+
+-- =====================================================================
+-- 18. Пересекающиеся working_hours одного дня не должны давать дубли
+--     слотов в get_available_slots (DISTINCT по slot_start/slot_end).
+--     Используем отдельную услугу и день недели, не пересекающиеся с
+--     остальными тестами файла.
+-- =====================================================================
+create temporary table tp2 as
+select
+  ((now() at time zone 'Europe/Moscow')::date + 31) as d,
+  (extract(isodow from ((now() at time zone 'Europe/Moscow')::date + 31))::int - 1) as wd;
+
+insert into public.services (id, name, duration_minutes, price_cents, is_active) values
+  ('00000000-0000-0000-0000-0000000000a4', 'Дубли слотов', 30, 100000, true);
+
+-- Два пересекающихся интервала: 09:00-11:00 и 10:00-12:00 (пересечение
+-- 10:00-11:00).
+insert into public.working_hours (weekday, start_time, end_time, is_active)
+select (select wd from tp2), '09:00', '11:00', true;
+insert into public.working_hours (weekday, start_time, end_time, is_active)
+select (select wd from tp2), '10:00', '12:00', true;
+
+select is(
+  (
+    select count(*)::int
+    from (
+      select slot_start, slot_end, count(*) as c
+      from public.get_available_slots(
+        '00000000-0000-0000-0000-0000000000a4',
+        (select d from tp2), (select d from tp2))
+      group by slot_start, slot_end
+      having count(*) > 1
+    ) as dupes
+  ),
+  0,
+  'пересекающиеся working_hours: ни одна пара (slot_start, slot_end) не повторяется'
+);
+
+-- Явное количество: слоты каждые 15 мин, услуга 30 мин, объединённый
+-- диапазон 09:00-12:00 (180 мин) -> старты 09:00..11:30 = 11 уникальных
+-- слотов, несмотря на то что 10:00-11:00 порождается двумя интервалами.
+select is(
+  (select count(*)::int from public.get_available_slots(
+     '00000000-0000-0000-0000-0000000000a4',
+     (select d from tp2), (select d from tp2))),
+  11,
+  'пересекающиеся working_hours: корректное число уникальных слотов (11), а не дубли'
+);
 
 select * from finish();
 rollback;

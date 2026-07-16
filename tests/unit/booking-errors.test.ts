@@ -24,6 +24,7 @@ describe("sqlstateToBookingCode", () => {
     ["PB010", "APPOINTMENT_NOT_OWNED"],
     ["PB011", "CANCELLATION_TOO_LATE"],
     ["PB012", "ALREADY_CANCELLED"],
+    ["PB013", "APPOINTMENT_NOT_CANCELLABLE"],
   ])("сопоставляет SQLSTATE %s с доменным кодом %s", (sqlstate, code) => {
     expect(sqlstateToBookingCode(sqlstate)).toBe(code);
   });
@@ -57,6 +58,14 @@ describe("toBookingError", () => {
   it("преобразует кастомный PB011 в CANCELLATION_TOO_LATE", () => {
     const err = toBookingError({ code: "PB011", message: "CANCELLATION_TOO_LATE" });
     expect(err.code).toBe("CANCELLATION_TOO_LATE");
+  });
+
+  it("преобразует кастомный PB013 в APPOINTMENT_NOT_CANCELLABLE", () => {
+    const err = toBookingError({
+      code: "PB013",
+      message: "APPOINTMENT_NOT_CANCELLABLE",
+    });
+    expect(err.code).toBe("APPOINTMENT_NOT_CANCELLABLE");
   });
 
   it("любую неизвестную ошибку сводит к INTERNAL_ERROR и логирует на сервере", () => {

@@ -14,7 +14,8 @@ import { mapAppointmentRow, type Appointment, type AppointmentRow } from "./type
  *
  * Бросает BookingError с одним из кодов: TELEGRAM_USER_NOT_FOUND,
  * APPOINTMENT_NOT_FOUND, APPOINTMENT_NOT_OWNED, CANCELLATION_TOO_LATE,
- * ALREADY_CANCELLED, INTERNAL_ERROR.
+ * ALREADY_CANCELLED, APPOINTMENT_NOT_CANCELLABLE (статус не confirmed —
+ * например, completed или no_show), INTERNAL_ERROR.
  */
 export async function cancelAppointmentByClient(
   input: CancelAppointmentInput

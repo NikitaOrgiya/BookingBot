@@ -36,6 +36,7 @@
 --   PB010 APPOINTMENT_NOT_OWNED
 --   PB011 CANCELLATION_TOO_LATE
 --   PB012 ALREADY_CANCELLED
+--   PB013 APPOINTMENT_NOT_CANCELLABLE
 --   23P01 SLOT_TAKEN (native exclusion_violation)
 
 -- =====================================================================
@@ -64,7 +65,9 @@
 -- независимо, что верно и при переходах DST). Начало и конец услуги
 -- обязаны целиком помещаться в один рабочий интервал. Отменённые записи
 -- время не блокируют. Прошедшие слоты и слоты раньше минимального
--- уведомления не возвращаются.
+-- уведомления не возвращаются. Результат DISTINCT по (slot_start, slot_end):
+-- если working_hours одного дня содержит пересекающиеся интервалы (схема
+-- этого не запрещает), один и тот же слот не должен повторяться в выдаче.
 
 create or replace function public.get_available_slots(
   p_service_id uuid,
@@ -162,7 +165,11 @@ begin
         + make_interval(mins => v_duration) as slot_end
     from candidates as c
   )
-  select r.slot_start, r.slot_end
+  -- DISTINCT: пересекающиеся интервалы working_hours одного дня (ничто в
+  -- схеме не запрещает админу их создать) иначе дают одну и ту же пару
+  -- (slot_start, slot_end) несколько раз — по разу на каждый интервал,
+  -- который её порождает.
+  select distinct r.slot_start, r.slot_end
   from resolved as r
   where r.slot_start >= v_now + make_interval(mins => v_min_notice)
     and not exists (
@@ -336,8 +343,11 @@ $$;
 -- Клиентская отмена. Не удаляет строку (история сохраняется), а переводит
 -- статус в 'cancelled', заполняет cancelled_at и, при наличии, cancel_reason.
 -- Проверяет принадлежность записи вызывающему клиенту и соблюдение
--- cancellation_notice_minutes. Повторная отмена уже отменённой записи
--- отклоняется доменным кодом ALREADY_CANCELLED (идемпотентно-предсказуемо).
+-- cancellation_notice_minutes. Только status = 'confirmed' может быть
+-- переведён в 'cancelled': повторная отмена уже отменённой записи
+-- отклоняется кодом ALREADY_CANCELLED (идемпотентно-предсказуемо), а любой
+-- иной статус (completed, no_show) — кодом APPOINTMENT_NOT_CANCELLABLE, вне
+-- зависимости от того, наступил ли уже start_at.
 --
 -- Вход:
 --   p_appointment_id    uuid    — запись;
@@ -388,14 +398,22 @@ begin
     raise exception using errcode = 'PB012', message = 'ALREADY_CANCELLED';
   end if;
 
+  -- Любой иной статус, кроме 'confirmed' (сейчас это 'completed' или
+  -- 'no_show'), нельзя отменить клиенту. Проверяется явно, а не выводится
+  -- из времени начала: администратор в будущем сможет проставить такой
+  -- статус и на ещё не начавшуюся запись, и в этом случае она всё равно
+  -- не должна возвращаться в 'cancelled' через этот путь.
+  if v_appt.status <> 'confirmed' then
+    raise exception using errcode = 'PB013', message = 'APPOINTMENT_NOT_CANCELLABLE';
+  end if;
+
   select bs.cancellation_notice_minutes
     into v_cancel_notice
     from public.business_settings as bs
    where bs.id = 1;
 
-  -- Слишком поздняя отмена: до начала осталось меньше требуемого запаса.
-  -- Завершённые/no_show записи (start_at уже в прошлом) тоже отсекаются
-  -- этим же условием.
+  -- Слишком поздняя отмена: до начала осталось меньше требуемого запаса
+  -- (это же условие отсекает и записи, чей start_at уже наступил).
   if v_appt.start_at - v_now < make_interval(mins => v_cancel_notice) then
     raise exception using errcode = 'PB011', message = 'CANCELLATION_TOO_LATE';
   end if;
