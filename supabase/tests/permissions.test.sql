@@ -87,7 +87,12 @@ select table_privs_are('public', 'working_hours', 'authenticated', '{SELECT,INSE
 select table_privs_are('public', 'working_hours', 'service_role', '{SELECT}'::name[], 'service_role: SELECT на working_hours');
 
 select table_privs_are('public', 'schedule_blocks', 'anon', '{}'::name[], 'anon: 0 прав на schedule_blocks');
-select table_privs_are('public', 'schedule_blocks', 'authenticated', '{SELECT,INSERT,UPDATE,DELETE}'::name[], 'authenticated: полный CRUD на schedule_blocks');
+-- Корректирующая миграция Этапа 4
+-- (20260718100000_admin_schedule_block_immutability.sql) отозвала DELETE:
+-- блокировка удаляется только через admin_delete_schedule_block(),
+-- которая проверяет, что блокировка ещё не наступила — проверено
+-- отдельно в supabase/tests/admin_functions.test.sql.
+select table_privs_are('public', 'schedule_blocks', 'authenticated', '{SELECT,INSERT,UPDATE}'::name[], 'authenticated: SELECT/INSERT/UPDATE на schedule_blocks, без DELETE (Этап 4)');
 select table_privs_are('public', 'schedule_blocks', 'service_role', '{SELECT}'::name[], 'service_role: SELECT на schedule_blocks');
 
 select table_privs_are('public', 'telegram_users', 'anon', '{}'::name[], 'anon: 0 прав на telegram_users');

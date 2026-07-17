@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/auth/require-admin";
 import { createAuthServerClient } from "@/lib/supabase/auth-server-client";
 import { appointmentStatusChangeSchema } from "@/lib/admin/schemas";
-import { toAdminError } from "@/lib/admin/errors";
+import { toAdminActionMessage } from "@/lib/admin/errors";
 
 export interface ChangeAppointmentStatusState {
   ok: boolean;
@@ -42,7 +42,10 @@ export async function changeAppointmentStatus(
   });
 
   if (error) {
-    return { ok: false, message: toAdminError(error).message };
+    return {
+      ok: false,
+      message: toAdminActionMessage(error, "Не удалось изменить статус записи."),
+    };
   }
 
   revalidatePath("/admin/appointments");

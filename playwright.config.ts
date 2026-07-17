@@ -29,9 +29,19 @@ export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // 0 (не только локально, но и в CI): ретраи размывали бы точный подсчёт
+  // total/passed/failed/skipped, которым CI (.github/workflows/ci.yml,
+  // job "playwright") проверяет, что все сценарии реально выполнились и
+  // прошли — "flaky, но пересдано" не должно маскироваться под "passed".
+  retries: 0,
   workers: 1,
-  reporter: process.env.CI ? [["github"], ["list"]] : "list",
+  // JSON-репортер в CI — по нему workflow проверяет, что тестов реально
+  // выполнено ожидаемое количество и что skipped/failed равны нулю (сам
+  // Playwright возвращает код 0 и для "все тесты пропущены", поэтому
+  // одного exit code недостаточно — см. ci.yml, шаг "Verify E2E results").
+  reporter: process.env.CI
+    ? [["github"], ["list"], ["json", { outputFile: "playwright-report/results.json" }]]
+    : "list",
   globalSetup: "./tests/e2e/global-setup.ts",
   use: {
     baseURL,

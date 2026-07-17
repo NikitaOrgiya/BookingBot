@@ -53,10 +53,8 @@ export async function getAdminBusinessSettings(): Promise<AdminBusinessSettings>
     .single<BusinessSettingsRow>();
 
   if (error || !data) {
-    throw new Error(
-      `Не удалось прочитать business_settings: ${error?.message ?? "пустой результат"}`,
-      { cause: error }
-    );
+    console.error("[admin] Не удалось прочитать business_settings:", error);
+    throw new Error("Не удалось прочитать настройки организации.");
   }
 
   return mapRow(data);

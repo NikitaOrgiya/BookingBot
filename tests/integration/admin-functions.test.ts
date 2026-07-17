@@ -356,4 +356,91 @@ describe.skipIf(!connectionString)("административные функц�
     await setup.query(`delete from public.schedule_blocks where id = $1`, [blockId]);
     await svc.end();
   });
+
+  it("admin_update_schedule_block/admin_delete_schedule_block: будущая блокировка изменяется и удаляется", async () => {
+    const dateString = isoDatePlusDays(20);
+
+    const { rows: created } = await adminConn.query(
+      `select id, reason from public.admin_create_schedule_block($1, '10:00', '12:00', $2)`,
+      [dateString, "future block for update/delete test"]
+    );
+    const blockId = created[0].id;
+
+    const { rows: updated } = await adminConn.query(
+      `select reason from public.admin_update_schedule_block($1, $2, '11:00', '13:00', $3)`,
+      [blockId, dateString, "updated future block"]
+    );
+    expect(updated[0].reason).toBe("updated future block");
+
+    await adminConn.query(`select public.admin_delete_schedule_block($1)`, [blockId]);
+    const { rows: afterDelete } = await setup.query(
+      `select count(*)::int as c from public.schedule_blocks where id = $1`,
+      [blockId]
+    );
+    expect(afterDelete[0].c).toBe(0);
+  });
+
+  it("прошедшую блокировку нельзя ни изменить, ни удалить (PAST_SCHEDULE_BLOCK_IMMUTABLE)", async () => {
+    const { rows: pastBlockRows } = await setup.query(
+      `insert into public.schedule_blocks (starts_at, ends_at, reason)
+       values (now() - interval '2 days', now() - interval '2 days' + interval '1 hour', 'past block')
+       returning id`
+    );
+    const pastBlockId = pastBlockRows[0].id;
+
+    await expect(
+      adminConn.query(
+        `select public.admin_update_schedule_block($1, $2, '10:00', '11:00', null)`,
+        [pastBlockId, isoDatePlusDays(1)]
+      )
+    ).rejects.toMatchObject({ code: "PB017" });
+
+    await expect(
+      adminConn.query(`select public.admin_delete_schedule_block($1)`, [pastBlockId])
+    ).rejects.toMatchObject({ code: "PB017" });
+
+    // Строка действительно осталась нетронутой.
+    const { rows: stillThere } = await setup.query(
+      `select count(*)::int as c from public.schedule_blocks where id = $1`,
+      [pastBlockId]
+    );
+    expect(stillThere[0].c).toBe(1);
+
+    await setup.query(`delete from public.schedule_blocks where id = $1`, [pastBlockId]);
+  });
+
+  it("обычный authenticated не может вызвать admin_update_schedule_block/admin_delete_schedule_block (NOT_ADMIN)", async () => {
+    const { rows: created } = await adminConn.query(
+      `select id from public.admin_create_schedule_block($1, '10:00', '12:00', null)`,
+      [isoDatePlusDays(21)]
+    );
+    const blockId = created[0].id;
+
+    await expect(
+      nonAdminConn.query(
+        `select public.admin_update_schedule_block($1, $2, '10:00', '11:00', null)`,
+        [blockId, isoDatePlusDays(21)]
+      )
+    ).rejects.toMatchObject({ code: "42501" });
+
+    await expect(
+      nonAdminConn.query(`select public.admin_delete_schedule_block($1)`, [blockId])
+    ).rejects.toMatchObject({ code: "42501" });
+
+    await setup.query(`delete from public.schedule_blocks where id = $1`, [blockId]);
+  });
+
+  it("прямой DELETE на schedule_blocks запрещён даже администратору (только через RPC)", async () => {
+    const { rows: created } = await adminConn.query(
+      `select id from public.admin_create_schedule_block($1, '10:00', '12:00', null)`,
+      [isoDatePlusDays(22)]
+    );
+    const blockId = created[0].id;
+
+    await expect(
+      adminConn.query(`delete from public.schedule_blocks where id = $1`, [blockId])
+    ).rejects.toMatchObject({ code: "42501" });
+
+    await adminConn.query(`select public.admin_delete_schedule_block($1)`, [blockId]);
+  });
 });

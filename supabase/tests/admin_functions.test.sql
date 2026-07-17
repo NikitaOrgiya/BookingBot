@@ -296,5 +296,109 @@ select is(
 
 reset role;
 
+-- ---------------------------------------------------------------------
+-- 8. admin_update_schedule_block / admin_delete_schedule_block:
+--    будущая блокировка изменяется/удаляется, прошедшая — неизменяема
+--    (см. 20260718100000_admin_schedule_block_immutability.sql).
+-- ---------------------------------------------------------------------
+
+-- Прошедшая блокировка — вставлена напрямую (не через RPC, у RPC нет
+-- пути создать её "задним числом" искусственно, что и требуется: запрет
+-- касается только изменения/удаления, не создания).
+insert into public.schedule_blocks (id, starts_at, ends_at, reason) values (
+  '00000000-0000-0000-0000-0000000000d1',
+  now() - interval '2 days',
+  now() - interval '2 days' + interval '1 hour',
+  'прошедшая тестовая блокировка'
+);
+
+select function_privs_are(
+  'public', 'admin_delete_schedule_block', '{uuid}'::name[],
+  'anon', '{}'::name[], 'anon: не может вызывать admin_delete_schedule_block()'
+);
+select function_privs_are(
+  'public', 'admin_delete_schedule_block', '{uuid}'::name[],
+  'authenticated', '{EXECUTE}'::name[], 'authenticated: может вызывать admin_delete_schedule_block()'
+);
+select function_privs_are(
+  'public', 'admin_delete_schedule_block', '{uuid}'::name[],
+  'service_role', '{}'::name[], 'service_role: не нуждается в admin_delete_schedule_block()'
+);
+select table_privs_are(
+  'public', 'schedule_blocks', 'authenticated', '{SELECT,INSERT,UPDATE}'::name[],
+  'authenticated: SELECT/INSERT/UPDATE на schedule_blocks, БЕЗ DELETE (корректирующая миграция Этапа 4)'
+);
+
+set role authenticated;
+set request.jwt.claim.sub = '00000000-0000-0000-0000-000000000102'; -- не админ
+
+select throws_ok(
+  $$select public.admin_update_schedule_block('00000000-0000-0000-0000-0000000000d1', current_date + 1, '10:00', '11:00', null)$$,
+  '42501', 'NOT_ADMIN',
+  'не-администратор: admin_update_schedule_block() отклоняется (NOT_ADMIN)'
+);
+select throws_ok(
+  $$select public.admin_delete_schedule_block('00000000-0000-0000-0000-0000000000d1')$$,
+  '42501', 'NOT_ADMIN',
+  'не-администратор: admin_delete_schedule_block() отклоняется (NOT_ADMIN)'
+);
+
+reset role;
+set role authenticated;
+set request.jwt.claim.sub = '00000000-0000-0000-0000-000000000101'; -- админ
+
+select throws_ok(
+  $$select public.admin_update_schedule_block('00000000-0000-0000-0000-0000000000d1', current_date + 1, '10:00', '11:00', null)$$,
+  'PB017', 'PAST_SCHEDULE_BLOCK_IMMUTABLE',
+  'администратор: изменить уже наступившую блокировку нельзя'
+);
+select throws_ok(
+  $$select public.admin_delete_schedule_block('00000000-0000-0000-0000-0000000000d1')$$,
+  'PB017', 'PAST_SCHEDULE_BLOCK_IMMUTABLE',
+  'администратор: удалить уже наступившую блокировку нельзя'
+);
+select throws_ok(
+  $$delete from public.schedule_blocks where id = '00000000-0000-0000-0000-0000000000d1'$$,
+  '42501', null,
+  'администратор: прямой DELETE schedule_blocks запрещён (нет GRANT, корректирующая миграция)'
+);
+
+select throws_ok(
+  $$select public.admin_update_schedule_block(gen_random_uuid(), current_date + 1, '10:00', '11:00', null)$$,
+  'PB016', 'SCHEDULE_BLOCK_NOT_FOUND',
+  'admin_update_schedule_block: несуществующая блокировка -> SCHEDULE_BLOCK_NOT_FOUND'
+);
+select throws_ok(
+  $$select public.admin_delete_schedule_block(gen_random_uuid())$$,
+  'PB016', 'SCHEDULE_BLOCK_NOT_FOUND',
+  'admin_delete_schedule_block: несуществующая блокировка -> SCHEDULE_BLOCK_NOT_FOUND'
+);
+
+-- Будущая блокировка — создаём через RPC (штатный путь), затем изменяем и
+-- удаляем, тоже через RPC.
+create temporary table future_block_id as
+select id from public.admin_create_schedule_block(current_date + 9, '10:00', '12:00', 'future test d2');
+
+select is(
+  (
+    select reason from public.admin_update_schedule_block(
+      (select id from future_block_id), current_date + 9, '11:00', '13:00', 'updated future test d2'
+    )
+  ),
+  'updated future test d2',
+  'администратор: будущая блокировка успешно изменяется через RPC'
+);
+select lives_ok(
+  $$select public.admin_delete_schedule_block((select id from future_block_id))$$,
+  'администратор: будущая блокировка успешно удаляется через RPC'
+);
+select is(
+  (select count(*)::int from public.schedule_blocks where id = (select id from future_block_id)),
+  0,
+  'после admin_delete_schedule_block строка действительно удалена'
+);
+
+reset role;
+
 select * from finish();
 rollback;

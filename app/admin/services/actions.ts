@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/auth/require-admin";
 import { createAuthServerClient } from "@/lib/supabase/auth-server-client";
 import { rublesToCents, serviceFormSchema } from "@/lib/admin/schemas";
+import { toAdminActionMessage } from "@/lib/admin/errors";
 
 export interface ServiceActionState {
   ok: boolean;
@@ -59,7 +60,7 @@ export async function upsertService(
     : await supabase.from("services").insert(payload);
 
   if (error) {
-    return { ok: false, message: `Не удалось сохранить услугу: ${error.message}` };
+    return { ok: false, message: toAdminActionMessage(error, "Не удалось сохранить услугу.") };
   }
 
   revalidatePath("/admin/services");
@@ -81,7 +82,7 @@ export async function setServiceActive(
     .eq("id", serviceId);
 
   if (error) {
-    return { ok: false, message: `Не удалось изменить активность: ${error.message}` };
+    return { ok: false, message: toAdminActionMessage(error, "Не удалось изменить активность услуги.") };
   }
 
   revalidatePath("/admin/services");

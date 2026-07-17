@@ -100,9 +100,8 @@ export default async function AdminAppointmentsPage({
     .range(from, to);
 
   if (error) {
-    throw new Error(`Не удалось получить список записей: ${error.message}`, {
-      cause: error,
-    });
+    console.error("[admin] Не удалось получить список записей:", error);
+    throw new Error("Не удалось получить список записей.");
   }
 
   const rows: AdminAppointmentRow[] = ((data ?? []) as unknown as AppointmentJoinRow[]).map(

@@ -15,10 +15,19 @@ export interface E2eEnv {
 }
 
 /**
- * Возвращает конфигурацию, если весь набор переменных присутствует, иначе
- * `null` — вызывающий код (global-setup и каждый spec) должен молча
- * пропустить работу, а не падать: локальный Supabase-стек (Docker) может
- * быть недоступен в песочнице/CI без Docker.
+ * Возвращает конфигурацию, если весь набор переменных присутствует.
+ *
+ * Поведение при отсутствии переменных зависит от `process.env.CI`
+ * (GitHub Actions выставляет его автоматически, `CI=true`):
+ *   - В CI это ошибка конфигурации, а не повод пропустить тесты: локальный
+ *     Supabase-стек в CI обязателен (job поднимает его сама, см. ci.yml),
+ *     поэтому отсутствие переменных означает, что стек не поднялся или
+ *     значения не были прокинуты — функция бросает исключение, что валит
+ *     весь прогон (а не тихо помечает 12 тестов как skipped).
+ *   - Вне CI (ручной локальный запуск разработчиком без Docker/Supabase)
+ *     возвращается `null` — вызывающий код (global-setup и каждый spec)
+ *     пропускает работу без Docker, это осознанно разрешённый режим
+ *     только для локальной ручной проверки.
  */
 export function getE2eEnv(): E2eEnv | null {
   const supabaseUrl = process.env.E2E_SUPABASE_URL;
@@ -32,6 +41,21 @@ export function getE2eEnv(): E2eEnv | null {
     process.env.E2E_NON_ADMIN_PASSWORD ?? "e2e-test-password-not-a-secret-456";
 
   if (!supabaseUrl || !supabaseServiceRoleKey || !supabasePublishableKey || !databaseUrl) {
+    const isCi = process.env.CI === "true" || process.env.CI === "1";
+    if (isCi) {
+      const missingNames = [
+        !supabaseUrl && "E2E_SUPABASE_URL",
+        !supabaseServiceRoleKey && "E2E_SUPABASE_SERVICE_ROLE_KEY",
+        !supabasePublishableKey && "E2E_SUPABASE_PUBLISHABLE_KEY",
+        !databaseUrl && "TEST_DATABASE_URL",
+      ].filter(Boolean);
+      throw new Error(
+        `Отсутствуют обязательные переменные E2E-окружения в CI: ${missingNames.join(", ")}. ` +
+          "В CI (process.env.CI=true) это ошибка конфигурации (локальный " +
+          "Supabase-стек не поднялся или значения не были прокинуты в job) — " +
+          "тесты не должны молча пропускаться."
+      );
+    }
     return null;
   }
 

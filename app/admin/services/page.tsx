@@ -22,9 +22,8 @@ async function loadServices(): Promise<ServiceRow[]> {
     .order("name", { ascending: true });
 
   if (error) {
-    throw new Error(`Не удалось получить список услуг: ${error.message}`, {
-      cause: error,
-    });
+    console.error("[admin] Не удалось получить список услуг:", error);
+    throw new Error("Не удалось получить список услуг.");
   }
 
   return (data ?? []) as ServiceRow[];

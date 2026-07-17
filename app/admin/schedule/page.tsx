@@ -49,15 +49,12 @@ async function loadScheduleData() {
   ]);
 
   if (workingHoursResult.error) {
-    throw new Error(
-      `Не удалось получить расписание: ${workingHoursResult.error.message}`,
-      { cause: workingHoursResult.error }
-    );
+    console.error("[admin] Не удалось получить расписание:", workingHoursResult.error);
+    throw new Error("Не удалось получить расписание.");
   }
   if (blocksResult.error) {
-    throw new Error(`Не удалось получить блокировки: ${blocksResult.error.message}`, {
-      cause: blocksResult.error,
-    });
+    console.error("[admin] Не удалось получить блокировки:", blocksResult.error);
+    throw new Error("Не удалось получить блокировки.");
   }
 
   return {

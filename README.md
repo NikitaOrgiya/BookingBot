@@ -107,7 +107,12 @@ Telegram-бот для онлайн-записи клиентов с админ�
 
 Подробности — в разделе "Этап 3: Telegram-бот" ниже.
 
-**Этап 4: авторизация и административная панель** — готово.
+**Этап 4: авторизация и административная панель** — реализован, ожидает
+CI/E2E и production smoke-test. Статус будет обновлён на "готово" только
+после того, как GitHub Actions реально прогонит и зафиксирует зелёными
+все обязательные job (lint/typecheck/unit/build, SQL+integration,
+`supabase db reset` + pgTAP, Playwright E2E без единого пропущенного или
+упавшего теста) — см. "Результаты проверки" в конце этого раздела.
 
 - `@supabase/ssr` вместо устаревшего `@supabase/auth-helpers-nextjs`: три
   разных клиента (`lib/supabase/browser-client.ts`,
@@ -131,6 +136,12 @@ Telegram-бот для онлайн-записи клиентов с админ�
   `public.admin_create_schedule_block()` / `admin_update_schedule_block()` /
   `admin_preview_schedule_block_conflicts()` — локальное время блокировки
   преобразуется в `timestamptz` внутри PostgreSQL, а не в браузере/Vercel;
+- корректирующая миграция `20260718100000_admin_schedule_block_immutability.sql`:
+  `admin_update_schedule_block()` и новая `admin_delete_schedule_block()`
+  запрещают менять/удалять уже наступившую блокировку
+  (`PAST_SCHEDULE_BLOCK_IMMUTABLE`) — иначе история расписания могла бы
+  быть переписана задним числом; прямой `DELETE` на `schedule_blocks`
+  отозван у `authenticated`, панель удаляет блокировки только через RPC;
 - страницы панели: dashboard, записи (фильтры, сортировка, пагинация,
   смена статуса), услуги (без физического удаления), расписание (недельные
   интервалы + разовые блокировки), настройки организации;
@@ -414,20 +425,50 @@ revoke all on all tables in schema public from authenticated;
 |---|---|---|---|
 | `admin_users` | — | — | — (только через `is_admin()`) |
 | `business_settings` | — | SELECT, UPDATE | SELECT |
-| `services` / `working_hours` / `schedule_blocks` | — | SELECT, INSERT, UPDATE, DELETE | SELECT |
+| `services` | — | SELECT, INSERT, UPDATE | SELECT |
+| `working_hours` | — | SELECT, INSERT, UPDATE, DELETE | SELECT |
+| `schedule_blocks` | — | SELECT, INSERT, UPDATE | SELECT |
 | `telegram_users` | — | SELECT | SELECT, INSERT, UPDATE |
 | `booking_sessions` | — | — | SELECT, INSERT, UPDATE, DELETE |
-| `appointments` | — | SELECT, UPDATE | SELECT, INSERT, UPDATE |
+| `appointments` | — | SELECT | SELECT, INSERT, UPDATE |
 | `processed_telegram_updates` | — | — | SELECT, INSERT |
 | `notification_deliveries` | — | SELECT | SELECT, INSERT, UPDATE |
 
 `anon` не имеет доступа ни к одной рабочей таблице: Telegram-бот и cron
 работают через `service_role` на сервере, а не через анонимный ключ.
-`authenticated` (администратор в панели) не может ни создать запись, ни
-удалить её напрямую — только через `SELECT`/`UPDATE`, с обязательной
-проверкой `public.is_admin()` в каждой RLS-политике. `service_role`
-использует `BYPASSRLS`, но это не освобождает его от `GRANT` — привилегии
-выданы явно для каждой таблицы, которая ему реально нужна.
+`service_role` использует `BYPASSRLS`, но это не освобождает его от
+`GRANT` — привилегии выданы явно для каждой таблицы, которая ему реально
+нужна.
+
+**Этап 4 сузил `authenticated` (администратор в панели) сильнее исходной
+таблицы выше — три отдельных изменения поверх Этапа 1:**
+
+- `appointments`: `UPDATE` **отозван** целиком
+  (`20260717090000_admin_change_appointment_status.sql`). Статус записи
+  меняется только через `public.admin_change_appointment_status()`
+  (`SECURITY DEFINER`, проверяет `is_admin()` сама, разрешает только
+  `confirmed → {completed, cancelled, no_show}`). Прямой `UPDATE
+  appointments` от `authenticated` теперь `permission denied` (42501)
+  даже для администратора.
+- `services`: `DELETE` **отозван**
+  (`20260717090100_services_restrict_delete.sql`). Физическое удаление
+  услуги невозможно ни через панель, ни напрямую через SQL от
+  `authenticated` — только активация/деактивация (`UPDATE is_active`).
+- `schedule_blocks`: `DELETE` **отозван**
+  (`20260718100000_admin_schedule_block_immutability.sql`, корректирующая
+  миграция). Блокировка удаляется только через
+  `public.admin_delete_schedule_block()`, которая (как и
+  `admin_update_schedule_block()`) отказывается менять/удалять уже
+  наступившую блокировку (`starts_at <= now()` →
+  `PAST_SCHEDULE_BLOCK_IMMUTABLE`) — историю расписания нельзя переписать
+  задним числом.
+
+Во всех трёх случаях RLS-политика, изначально опиравшаяся на снятый
+`GRANT`, тоже удалена/не задействуется — единственный путь к изменению
+теперь физически проходит через `SECURITY DEFINER`-функцию, которая сама
+проверяет `public.is_admin()`, а не полагается на то, что вызывающая роль
+и так admin (тот же принцип, что и у `public.is_admin()` для
+`admin_users`).
 
 `public.is_admin()` — `SECURITY DEFINER` функция с зафиксированным
 `search_path` и полными именами таблиц (чтобы вызывающая роль не могла
@@ -1311,18 +1352,41 @@ E2E создаются автоматически и **только** в лок�
 `tests/e2e/global-setup.ts` явно отказывается запускаться, если
 `E2E_SUPABASE_URL` не похож на `127.0.0.1`/`localhost` (см.
 `tests/e2e/README.md`). Production Supabase и реальные записи в E2E
-никогда не используются. Без переменных окружения локального стека весь
-набор аккуратно пропускает себя (`test.skip`), а не падает и не
-подделывает результат — это подтверждено в этой репозитории (браузер
-Chromium запускается, dev-сервер поднимается, все 12 тестов корректно
-помечаются skipped при отсутствии `E2E_SUPABASE_URL` и т.д.), но полный
-прогон с реальным Supabase Auth требует Docker (`supabase start`),
-недоступного в некоторых песочницах.
+никогда не используются.
+
+**Поведение при отсутствии локального Supabase-стека зависит от
+`process.env.CI`:**
+
+- **В CI** (`.github/workflows/ci.yml`, job `playwright`) — это ошибка
+  конфигурации, а не повод пропустить тесты: `tests/e2e/env.ts`
+  бросает исключение вместо `test.skip`, job дополнительно сама
+  проверяет, что `supabase status` реально вернула URL/ключи (иначе
+  падает раньше, до попытки запустить тесты), а после прогона отдельный
+  шаг разбирает JSON-отчёт Playwright и требует `skipped = 0`,
+  `failed = 0` и выполнение всех ожидаемых сценариев — падение или
+  пропуск любого теста блокирует Pull Request.
+- **При ручном локальном запуске** без Docker/Supabase — это
+  единственный разрешённый случай `test.skip`, чтобы разработчик без
+  локального Supabase-стека не был заблокирован (см. `tests/e2e/README.md`).
 
 ```bash
 npx playwright install --with-deps chromium   # один раз (если браузер ещё не установлен)
 npm run test:e2e
 ```
+
+### Результаты проверки (заполняется по факту, не заранее)
+
+| Проверка | Результат |
+|---|---|
+| `npm run lint` / `typecheck` / `test:unit` / `build` | см. отчёт в PR |
+| SQL/pgTAP + integration (bare PostgreSQL) | см. отчёт в PR |
+| `supabase start` + `supabase db reset --local` + `supabase test db` | см. отчёт в PR (GitHub Actions job `supabase-db-reset`) |
+| Playwright E2E (12 сценариев, реальный локальный Supabase Auth в CI) | см. отчёт в PR (GitHub Actions job `playwright`) |
+| GitHub Actions run | ссылка появится после первого прогона по этому PR |
+
+Статус этапа выше остаётся "реализован, ожидает CI/E2E", пока эта таблица
+не будет заполнена реальными числами из фактически завершившегося
+прогона GitHub Actions.
 
 ## Локальный запуск
 
@@ -1370,14 +1434,18 @@ Telegram-бот".
    (`get_available_slots`, `reserve_appointment`, `cancel_appointment_by_client`).~~
    Готово.
 3. ~~Telegram-бот и клиентский сценарий записи.~~ Готово.
-4. ~~Авторизация и административная панель.~~ Готово.
+4. Авторизация и административная панель — код реализован, ожидает
+   зелёного прогона CI/E2E (см. "Результаты проверки" в разделе "Этап 4"
+   выше) перед тем, как считаться готовым.
 5. Напоминания.
 6. Полное тестирование (unit, SQL, integration, Playwright) — базовый набор
    для Этапа 4 добавлен; продолжится на следующих этапах по мере роста
    функциональности.
 7. CI/CD и деплой на Vercel — `.github/workflows/ci.yml` добавлен в рамках
-   Этапа 4 (lint/typecheck/unit/build + отдельная job SQL/integration);
-   автоматизация деплоя на Vercel — отдельная задача.
+   Этапа 4, все 4 job (lint/typecheck/unit/build, SQL+integration,
+   `supabase db reset`+pgTAP, Playwright E2E) обязательны — падение или
+   пропуск любой из них блокирует Pull Request; автоматизация деплоя на
+   Vercel — отдельная задача.
 8. Финальное портфолио-оформление.
 
 Подробности каждого этапа — в техническом задании проекта.

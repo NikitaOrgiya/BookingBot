@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -14,6 +15,11 @@ concurrency:
 # набор переменных при любом обращении к process.env (typecheck/build
 # используют модули, которые их импортируют). CI не использует
 # production secrets ни здесь, ни в одной из jobs ниже.
+#
+# Версия Supabase CLI закреплена одним значением (SUPABASE_CLI_VERSION) и
+# переиспользуется во всех jobs — то же значение, что установлено как
+# devDependency "supabase" в package.json и использовалось при локальной
+# разработке этого этапа.
 env:
   NEXT_PUBLIC_APP_URL: http://localhost:3000
   NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
@@ -23,10 +29,10 @@ env:
   TELEGRAM_BOT_USERNAME: ci_placeholder_bot
   TELEGRAM_WEBHOOK_SECRET: ci_placeholder_webhook_secret_000000
   CRON_SECRET: ci-placeholder-cron-secret-00000000
+  SUPABASE_CLI_VERSION: "2.109.1"
 
 jobs:
-  # Обязательная job (раздел 16 ТЗ Этапа 4): lint, typecheck, unit-тесты,
-  # production build. PR не должен считаться готовым, если она падает.
+  # Обязательная job: lint, typecheck, unit-тесты, production build.
   lint-typecheck-unit-build:
     name: Lint, typecheck, unit tests, build
     runs-on: ubuntu-latest
@@ -52,11 +58,11 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Отдельная job: SQL/pgTAP + integration-тесты на обычном PostgreSQL —
+  # Обязательная job: SQL/pgTAP + integration-тесты на обычном PostgreSQL —
   # тот же подход, что и scripts/test-sql.sh локально (см. README, раздел
   # "Локальная проверка миграций"): local_bootstrap.sql создаёт
   # anon/authenticated/service_role и заглушку схемы auth, реальный
-  # Supabase-проект их уже предоставляет. Обязательная job.
+  # Supabase-проект их уже предоставляет "из коробки".
   sql-and-integration:
     name: SQL/pgTAP + integration tests (PostgreSQL)
     runs-on: ubuntu-latest
@@ -100,32 +106,50 @@ jobs:
       - name: Integration tests
         run: npm run test:integration
 
-  # Проверка через настоящий Supabase CLI: применяет все миграции +
-  # seed.sql "с нуля" на реальном локальном Supabase-стеке (Docker,
-  # доступен на стандартных GitHub-hosted runners). Ловит проблемы,
-  # которые bare-PostgreSQL проверка выше в принципе не видит (например,
-  # специфичное для Supabase поведение). --local гарантирует, что это
-  # никогда не может задеть production-проект; секреты не нужны.
+  # Обязательная job: применяет все миграции + seed.sql "с нуля" на
+  # настоящем локальном Supabase-стеке через сам Supabase CLI (Docker,
+  # доступен на стандартных GitHub-hosted runners), затем прогоняет
+  # pgTAP-тесты штатной командой CLI (`supabase test db`). Ловит проблемы,
+  # которые bare-PostgreSQL проверка выше в принципе не видит. --local
+  # гарантирует, что это никогда не может задеть production-проект;
+  # секреты не нужны. Стек всегда останавливается в конце (if: always()),
+  # даже если reset/тесты упали.
   supabase-db-reset:
-    name: supabase db reset (Supabase CLI, local stack)
+    name: supabase start + db reset + pgTAP (Supabase CLI, local stack)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: supabase start
+        run: supabase start
+
       - name: supabase db reset --local
         run: supabase db reset --local
 
-  # Необязательная job (раздел 16 ТЗ: "Playwright можно вынести в
-  # отдельную job"): полный E2E-прогон против настоящего локального
-  # Supabase Auth. continue-on-error — падение здесь не блокирует PR,
-  # в отличие от job'ов выше.
+      - name: supabase test db
+        run: supabase test db
+
+      - name: supabase stop
+        if: always()
+        run: supabase stop --no-backup
+
+  # Обязательная job: полный E2E-прогон Playwright против настоящего
+  # локального Supabase Auth (не production, не заглушка). Падение любого
+  # сценария или отсутствие обязательных E2E-переменных блокирует PR — в
+  # отличие от локального ручного запуска без Docker/Supabase (там
+  # tests/e2e/env.ts осознанно пропускает тесты, см. tests/e2e/README.md),
+  # в CI (process.env.CI задаётся GitHub Actions автоматически)
+  # tests/e2e/env.ts:getE2eEnv() бросает ошибку вместо skip, а шаг
+  # "Verify Supabase connection details" ниже — дополнительная,
+  # независимая проверка того же на уровне workflow.
   playwright:
     name: Playwright E2E (local Supabase stack)
     runs-on: ubuntu-latest
     needs: [lint-typecheck-unit-build]
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -138,7 +162,7 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: ${{ env.SUPABASE_CLI_VERSION }}
 
       - name: supabase start
         run: supabase start
@@ -154,6 +178,25 @@ jobs:
             echo "db_url=$(jq -r '.DB_URL' /tmp/supabase-status.json)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify Supabase connection details were extracted
+        run: |
+          missing=0
+          check() {
+            name="$1"; value="$2"
+            if [ -z "$value" ] || [ "$value" = "null" ]; then
+              echo "::error::${name} was not obtained from 'supabase status' — local Supabase did not start correctly."
+              missing=1
+            fi
+          }
+          check "API_URL" "${{ steps.supabase_status.outputs.url }}"
+          check "ANON_KEY" "${{ steps.supabase_status.outputs.anon_key }}"
+          check "SERVICE_ROLE_KEY" "${{ steps.supabase_status.outputs.service_role_key }}"
+          check "DB_URL" "${{ steps.supabase_status.outputs.db_url }}"
+          if [ "$missing" = "1" ]; then
+            echo "::error::Required E2E Supabase connection details are missing — failing the job instead of letting E2E tests silently skip."
+            exit 1
+          fi
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
@@ -165,9 +208,42 @@ jobs:
           TEST_DATABASE_URL: ${{ steps.supabase_status.outputs.db_url }}
         run: npm run test:e2e
 
+      - name: Verify E2E results (zero skipped, zero failed, expected count executed)
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            const EXPECTED_TOTAL = 12;
+            const report = JSON.parse(fs.readFileSync("playwright-report/results.json", "utf8"));
+            let total = 0, passed = 0, failed = 0, skipped = 0;
+            function walk(suite) {
+              for (const spec of suite.specs || []) {
+                for (const test of spec.tests || []) {
+                  total += 1;
+                  if (test.status === "expected") passed += 1;
+                  else if (test.status === "skipped") skipped += 1;
+                  else failed += 1; // "unexpected" or "flaky" — both indicate a real problem
+                }
+              }
+              for (const s of suite.suites || []) walk(s);
+            }
+            for (const s of report.suites || []) walk(s);
+            console.log(`E2E results: total=${total} passed=${passed} failed=${failed} skipped=${skipped} (expected total >= ${EXPECTED_TOTAL})`);
+            let ok = true;
+            if (skipped > 0) { console.error(`FAIL: ${skipped} test(s) skipped — E2E must not be skipped in CI.`); ok = false; }
+            if (failed > 0) { console.error(`FAIL: ${failed} test(s) failed/flaky.`); ok = false; }
+            if (total < EXPECTED_TOTAL) { console.error(`FAIL: only ${total} test(s) executed, expected at least ${EXPECTED_TOTAL}.`); ok = false; }
+            if (!ok) process.exit(1);
+            console.log("OK: all expected E2E tests executed and passed, zero skipped, zero failed.");
+          '
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+      - name: supabase stop
+        if: always()
+        run: supabase stop --no-backup

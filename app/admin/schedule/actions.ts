@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/auth/require-admin";
 import { createAuthServerClient } from "@/lib/supabase/auth-server-client";
 import { scheduleBlockFormSchema, workingHourFormSchema } from "@/lib/admin/schemas";
-import { toAdminError } from "@/lib/admin/errors";
+import { toAdminActionMessage, toAdminError } from "@/lib/admin/errors";
 import type { ActionResult } from "@/components/admin/action-button";
 
 // ---------------------------------------------------------------------
@@ -15,12 +15,6 @@ export interface WorkingHourActionState {
   ok: boolean;
   message: string;
 }
-
-/** POSTGRES exclusion_violation — интервал пересекается с уже
- * существующим активным интервалом того же дня недели (см.
- * supabase/migrations/20260717090200_working_hours_no_overlap.sql). Это
- * ожидаемый, объяснимый пользователю конфликт, а не внутренняя ошибка. */
-const EXCLUSION_VIOLATION = "23P01";
 
 export async function upsertWorkingHour(
   _prevState: WorkingHourActionState | null,
@@ -57,14 +51,10 @@ export async function upsertWorkingHour(
     : await supabase.from("working_hours").insert(payload);
 
   if (error) {
-    if (error.code === EXCLUSION_VIOLATION) {
-      return {
-        ok: false,
-        message:
-          "Этот интервал пересекается с уже существующим активным интервалом того же дня недели.",
-      };
-    }
-    return { ok: false, message: `Не удалось сохранить интервал: ${error.message}` };
+    // toAdminActionMessage сопоставляет 23P01 (exclusion_violation) с
+    // WORKING_HOURS_OVERLAP автоматически (см. lib/admin/errors.ts) —
+    // отдельная ручная проверка error.code здесь больше не нужна.
+    return { ok: false, message: toAdminActionMessage(error, "Не удалось сохранить интервал.") };
   }
 
   revalidatePath("/admin/schedule");
@@ -77,7 +67,7 @@ export async function deleteWorkingHour(id: string): Promise<ActionResult> {
   const { error } = await supabase.from("working_hours").delete().eq("id", id);
 
   if (error) {
-    return { ok: false, message: `Не удалось удалить интервал: ${error.message}` };
+    return { ok: false, message: toAdminActionMessage(error, "Не удалось удалить интервал.") };
   }
 
   revalidatePath("/admin/schedule");
@@ -93,14 +83,10 @@ export async function setWorkingHourActive(id: string, isActive: boolean): Promi
     .eq("id", id);
 
   if (error) {
-    if (error.code === EXCLUSION_VIOLATION) {
-      return {
-        ok: false,
-        message:
-          "Нельзя активировать: пересекается с уже существующим активным интервалом того же дня.",
-      };
-    }
-    return { ok: false, message: `Не удалось изменить активность: ${error.message}` };
+    return {
+      ok: false,
+      message: toAdminActionMessage(error, "Не удалось изменить активность интервала."),
+    };
   }
 
   revalidatePath("/admin/schedule");
@@ -214,10 +200,13 @@ export async function createScheduleBlock(
     });
 
     if (error) {
-      return { ok: false, message: toAdminError(error).message };
+      return {
+        ok: false,
+        message: toAdminActionMessage(error, "Не удалось создать блокировку."),
+      };
     }
   } catch (error) {
-    return { ok: false, message: toAdminError(error).message };
+    return { ok: false, message: toAdminActionMessage(error, "Не удалось создать блокировку.") };
   }
 
   revalidatePath("/admin/schedule");
@@ -278,23 +267,36 @@ export async function updateScheduleBlock(
     });
 
     if (error) {
-      return { ok: false, message: toAdminError(error).message };
+      return {
+        ok: false,
+        message: toAdminActionMessage(error, "Не удалось сохранить блокировку."),
+      };
     }
   } catch (error) {
-    return { ok: false, message: toAdminError(error).message };
+    return { ok: false, message: toAdminActionMessage(error, "Не удалось сохранить блокировку.") };
   }
 
   revalidatePath("/admin/schedule");
   return { ok: true, message: "Блокировка обновлена." };
 }
 
+/**
+ * Единственный способ удалить блокировку — эта RPC (SECURITY DEFINER,
+ * см. supabase/migrations/20260718100000_admin_schedule_block_immutability.sql).
+ * Прямой DELETE от authenticated отозван на уровне базы: без RPC любая
+ * уже наступившая блокировка могла бы быть удалена "задним числом",
+ * искажая исторический факт (в это время расписание было закрыто).
+ */
 export async function deleteScheduleBlock(id: string): Promise<ActionResult> {
   await requireAdmin();
   const supabase = await createAuthServerClient();
-  const { error } = await supabase.from("schedule_blocks").delete().eq("id", id);
+  const { error } = await supabase.rpc("admin_delete_schedule_block", { p_id: id });
 
   if (error) {
-    return { ok: false, message: `Не удалось удалить блокировку: ${error.message}` };
+    return {
+      ok: false,
+      message: toAdminActionMessage(error, "Не удалось удалить блокировку."),
+    };
   }
 
   revalidatePath("/admin/schedule");

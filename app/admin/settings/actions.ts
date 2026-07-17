@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/auth/require-admin";
 import { createAuthServerClient } from "@/lib/supabase/auth-server-client";
 import { businessSettingsFormSchema } from "@/lib/admin/schemas";
+import { toAdminActionMessage } from "@/lib/admin/errors";
 
 export interface SettingsActionState {
   ok: boolean;
@@ -54,6 +55,9 @@ export async function updateBusinessSettings(
     .single<{ timezone: string }>();
 
   if (currentError || !current) {
+    if (currentError) {
+      console.error("[admin] Не удалось прочитать business_settings:", currentError);
+    }
     return { ok: false, message: "Не удалось прочитать текущие настройки." };
   }
 
@@ -84,7 +88,7 @@ export async function updateBusinessSettings(
     .eq("id", 1);
 
   if (error) {
-    return { ok: false, message: `Не удалось сохранить настройки: ${error.message}` };
+    return { ok: false, message: toAdminActionMessage(error, "Не удалось сохранить настройки.") };
   }
 
   revalidatePath("/admin/settings");
