@@ -63,22 +63,15 @@ jobs:
   # "Локальная проверка миграций"): local_bootstrap.sql создаёт
   # anon/authenticated/service_role и заглушку схемы auth, реальный
   # Supabase-проект их уже предоставляет "из коробки".
+  #
+  # PostgreSQL устанавливается и запускается ПРЯМО НА РАННЕРЕ (не как
+  # services: postgres — тот работает в отдельном Docker-контейнере со
+  # своей файловой системой, и postgresql-16-pgtap, поставленный apt-get на
+  # раннере, физически не виден внутри контейнера — именно так упал первый
+  # реальный прогон этого workflow: "extension pgtap is not available").
   sql-and-integration:
     name: SQL/pgTAP + integration tests (PostgreSQL)
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       PGHOST: 127.0.0.1
       PGPORT: 5432
@@ -95,10 +88,15 @@ jobs:
 
       - run: npm ci
 
-      - name: Install pgTAP
+      - name: Install PostgreSQL 16 + pgTAP
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-16-pgtap
+          sudo apt-get install -y postgresql-16 postgresql-16-pgtap
+
+      - name: Start PostgreSQL and set postgres role password
+        run: |
+          sudo service postgresql start
+          sudo -u postgres psql -c "alter user postgres password 'postgres';"
 
       - name: SQL / pgTAP tests
         run: npm run test:sql
