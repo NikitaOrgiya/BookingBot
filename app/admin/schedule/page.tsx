@@ -118,17 +118,19 @@ export default async function AdminSchedulePage() {
                         </span>
                       </span>
                       <div className="flex gap-2">
+                        {/* .bind() на серверном экшене, а не стрелочная функция — обычную
+                            замыкающую функцию Server Component не может передать Client
+                            Component как проп (React отклоняет это в рантайме), а bind()
+                            возвращает связанную ссылку на сам Server Action. */}
                         <ActionButton
                           label={interval.is_active ? "Деактивировать" : "Активировать"}
-                          action={() =>
-                            setWorkingHourActive(interval.id, !interval.is_active)
-                          }
+                          action={setWorkingHourActive.bind(null, interval.id, !interval.is_active)}
                         />
                         <ActionButton
                           label="Удалить"
                           variant="danger"
                           confirmMessage="Удалить этот рабочий интервал?"
-                          action={() => deleteWorkingHour(interval.id)}
+                          action={deleteWorkingHour.bind(null, interval.id)}
                         />
                       </div>
                     </li>
@@ -180,7 +182,7 @@ export default async function AdminSchedulePage() {
                       label="Удалить"
                       variant="danger"
                       confirmMessage="Удалить эту блокировку?"
-                      action={() => deleteScheduleBlock(block.id)}
+                      action={deleteScheduleBlock.bind(null, block.id)}
                     />
                   </div>
 

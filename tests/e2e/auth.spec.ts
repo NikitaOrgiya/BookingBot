@@ -18,13 +18,19 @@ test.describe("аутентификация панели администрат�
   }) => {
     await loginAs(page, env!.adminEmail, "определённо-неверный-пароль");
     await expect(page).toHaveURL(/\/login/);
-    await expect(page.getByRole("alert")).toHaveText("Неверный email или пароль.");
+    // page.getByRole("alert") без уточнения совпадает и с нашим <p
+    // role="alert"> с текстом ошибки, и со служебным
+    // <div role="alert" id="__next-route-announcer__">, который Next.js
+    // сам добавляет на каждую страницу для скринридеров (объявление
+    // смены маршрута) — strict mode violation. Наш собственный алерт —
+    // единственный <p role="alert">, поэтому уточняем тег.
+    await expect(page.locator('p[role="alert"]')).toHaveText("Неверный email или пароль.");
   });
 
   test("3. неадминистратор не получает доступ к панели", async ({ page }) => {
     await loginAs(page, env!.nonAdminEmail, env!.nonAdminPassword);
     await expect(page).toHaveURL(/\/login/);
-    await expect(page.getByRole("alert")).toHaveText(
+    await expect(page.locator('p[role="alert"]')).toHaveText(
       "У этой учётной записи нет доступа к панели администратора."
     );
   });
