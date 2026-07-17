@@ -14,13 +14,22 @@ test.describe("управление услугами", () => {
   });
 
   test("6. создаётся новая услуга", async ({ page }) => {
+    // Каждая существующая услуга тоже рендерит свою (свёрнутую) форму
+    // редактирования с полем "Название" (см. app/admin/services/page.tsx),
+    // поэтому page.getByLabel("Название") без учёта контекста совпадёт со
+    // всеми ними разом (strict mode violation) — нужно явно взять форму
+    // именно создания, по кнопке "Создать услугу", которая есть только в
+    // ней (у форм редактирования — "Сохранить изменения").
     await page.getByText("Добавить услугу").click();
-    await page.getByLabel("Название").fill(serviceName);
-    await page.getByLabel("Длительность (мин)").fill("45");
-    await page.getByLabel("Цена (₽)").fill("1500");
-    await page.getByRole("button", { name: "Создать услугу" }).click();
+    const createForm = page
+      .locator("form")
+      .filter({ has: page.getByRole("button", { name: "Создать услугу" }) });
+    await createForm.getByLabel("Название").fill(serviceName);
+    await createForm.getByLabel("Длительность (мин)").fill("45");
+    await createForm.getByLabel("Цена (₽)").fill("1500");
+    await createForm.getByRole("button", { name: "Создать услугу" }).click();
 
-    await expect(page.getByText("Услуга создана.")).toBeVisible();
+    await expect(createForm.getByText("Услуга создана.")).toBeVisible();
     await page.reload();
     await expect(page.getByText(serviceName)).toBeVisible();
   });

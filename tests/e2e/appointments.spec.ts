@@ -77,9 +77,16 @@ test.describe("управление записями", () => {
     const row = page.locator("tr", { hasText: clientFirstName });
     await row.getByRole("button", { name: "Завершить" }).click();
 
-    await expect(row.getByText("Статус записи обновлён.")).toBeVisible();
-    await page.reload();
+    // Не проверяем промежуточное "Статус записи обновлён.": оно рендерится
+    // внутри кнопки-формы, которая после успешного router.refresh() (см.
+    // components/admin/appointment-table.tsx, isAdminTransitionAllowed)
+    // перестаёт рендериться вообще, т.к. из статуса "completed" больше нет
+    // разрешённых переходов — сообщение размонтируется гонкой с самим
+    // обновлением данных. Единственная надёжная проверка — итоговый,
+    // персистентный статус записи.
     const updatedRow = page.locator("tr", { hasText: clientFirstName });
-    await expect(updatedRow.getByText("Завершена")).toBeVisible();
+    await expect(updatedRow.getByText("Завершена")).toBeVisible({ timeout: 10_000 });
+    await page.reload();
+    await expect(page.locator("tr", { hasText: clientFirstName }).getByText("Завершена")).toBeVisible();
   });
 });

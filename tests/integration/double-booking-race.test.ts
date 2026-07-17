@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  *
  * Требует переменную окружения TEST_DATABASE_URL — строку подключения к
  * PostgreSQL с уже применёнными миграциями (supabase/migrations) и
- * bootstrap-скриптом supabase/tests/local_bootstrap.sql (роли
+ * bootstrap-скриптом scripts/sql/local_bootstrap.sql (роли
  * anon/authenticated/service_role и заглушка схемы auth). Роль в строке
  * подключения должна иметь возможность выполнить `set role service_role`
  * (проще всего — подключаться суперпользователем, как в CI/локальной

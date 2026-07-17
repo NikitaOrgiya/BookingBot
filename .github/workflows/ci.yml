@@ -60,7 +60,7 @@ jobs:
 
   # Обязательная job: SQL/pgTAP + integration-тесты на обычном PostgreSQL —
   # тот же подход, что и scripts/test-sql.sh локально (см. README, раздел
-  # "Локальная проверка миграций"): local_bootstrap.sql создаёт
+  # "Локальная проверка миграций"): scripts/sql/local_bootstrap.sql создаёт
   # anon/authenticated/service_role и заглушку схемы auth, реальный
   # Supabase-проект их уже предоставляет "из коробки".
   #

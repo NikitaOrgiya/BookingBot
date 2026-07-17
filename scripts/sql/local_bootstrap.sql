@@ -4,9 +4,18 @@
 -- "из коробки" — в production-миграциях (supabase/migrations) они не
 -- создаются и создавать их там нельзя.
 --
+-- Намеренно лежит вне supabase/tests/: `supabase test db` прогоняет
+-- через pg_prove каждый *.sql файл из этой директории как отдельный
+-- TAP-тест, а этот файл — не тест и не содержит TAP-плана (что и
+-- ломало supabase-db-reset job: "Parse errors: No plan found in TAP
+-- output", плюс "permission denied for schema auth" — в настоящем
+-- Supabase-стеке схема auth уже существует и не принадлежит роли
+-- postgres). Используется только через scripts/test-sql.sh
+-- (bare-PostgreSQL проверка), не через Supabase CLI.
+--
 -- Использование:
 --   createdb bookingbot_test
---   psql bookingbot_test -f supabase/tests/local_bootstrap.sql
+--   psql bookingbot_test -f scripts/sql/local_bootstrap.sql
 --   for f in supabase/migrations/*.sql; do psql bookingbot_test -f "$f"; done
 --   psql bookingbot_test -f supabase/seed.sql
 

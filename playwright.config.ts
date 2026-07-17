@@ -62,11 +62,22 @@ export default defineConfig({
       },
     },
   ],
+  // В CI поднимаем production-сборку (`next build` + `next start`), а не
+  // `next dev`: dev-сервер компилирует каждый маршрут и каждый Server
+  // Action по требованию при первом обращении, и на раннере GitHub Actions
+  // это может занять больше стандартных таймаутов Playwright (expect —
+  // 5с, action — 30с), из-за чего первые же сценарии (например, заполнение
+  // полей формы расписания) падали с "Test timeout exceeded" ещё до того,
+  // как страница успевала прокомпилироваться. Production-сборка компилирует
+  // всё заранее и не подвержена этой задержке — так же, как реальный
+  // production-деплой. Локально оставляем `next dev` для быстрой разработки.
   webServer: {
-    command: `npm run dev -- --port ${PORT}`,
+    command: process.env.CI
+      ? `npm run build && npm run start -- --port ${PORT}`
+      : `npm run dev -- --port ${PORT}`,
     url: baseURL,
     reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
+    timeout: process.env.CI ? 180_000 : 60_000,
     env: webServerEnv,
   },
 });

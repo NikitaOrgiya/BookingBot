@@ -481,11 +481,18 @@ revoke all on all tables in schema public from authenticated;
 Мы работаем не в самом Supabase, а в обычном PostgreSQL, поэтому для
 локальных тестов нужно сначала создать роли `anon`/`authenticated`/
 `service_role` и заглушку схемы `auth` через
-`supabase/tests/local_bootstrap.sql` (в реальном Supabase-проекте они уже
+`scripts/sql/local_bootstrap.sql` (в реальном Supabase-проекте они уже
 есть — создавать их в `supabase/migrations/` нельзя, это ломает
 production-проект; там применяются только файлы из `supabase/migrations/`
 и `seed.sql`, например через `supabase db push`). Команда `npm run
 test:sql` (см. ниже) выполняет весь этот порядок автоматически.
+Файл намеренно лежит вне `supabase/tests/`: `supabase test db` (в
+job `supabase-db-reset`) прогоняет через `pg_prove` каждый `*.sql` файл
+из `supabase/tests/` как отдельный TAP-тест, и раньше принимал этот
+bootstrap-файл за тест, падая с "Parse errors: No plan found in TAP
+output" и "permission denied for schema auth" (в настоящем локальном
+Supabase-стеке схема `auth` уже существует и не принадлежит роли,
+которой выполняются тесты).
 
 ### SQL-тесты и настоящий конкурентный тест
 
@@ -516,7 +523,7 @@ Telegram update и повторное напоминание отклоняют�
 
 Команда `npm run test:sql` делает всё одним вызовом
 (`scripts/test-sql.sh`): пересоздаёт локальную базу `bookingbot_test`,
-накатывает `local_bootstrap.sql` + все миграции + `seed.sql`, ставит
+накатывает `scripts/sql/local_bootstrap.sql` + все миграции + `seed.sql`, ставит
 расширение `pgtap` и запускает `pg_prove` по всем `supabase/tests/*.test.sql`.
 Параметры подключения — из обычных переменных libpq (`PGHOST`, `PGPORT`,
 `PGUSER`, `PGPASSWORD`); по умолчанию используется локальный сокет текущего
@@ -544,7 +551,7 @@ npm run test:sql
 **60-75% `23P01` / 25-40% `40P01`**, ровно один победитель в каждом прогоне.
 
 Требуемая переменная окружения — `TEST_DATABASE_URL`: строка подключения к
-PostgreSQL с уже применёнными миграциями и `local_bootstrap.sql` (проще
+PostgreSQL с уже применёнными миграциями и `scripts/sql/local_bootstrap.sql` (проще
 всего — та же `bookingbot_test`, которую только что подготовил
 `npm run test:sql`). Роль в строке подключения должна иметь право
 выполнить `set role service_role` (суперпользователь — самый простой
