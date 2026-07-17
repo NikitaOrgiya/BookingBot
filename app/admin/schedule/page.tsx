@@ -89,6 +89,7 @@ export default async function AdminSchedulePage() {
           {byWeekday.map((intervals, weekday) => (
             <div
               key={weekday}
+              data-testid={`working-hours-day-${weekday}`}
               className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950"
             >
               <h3 className="mb-3 font-medium text-zinc-950 dark:text-zinc-50">

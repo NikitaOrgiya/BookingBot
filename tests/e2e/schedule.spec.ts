@@ -13,16 +13,27 @@ test.describe("расписание", () => {
   });
 
   test("8. добавляется рабочий интервал", async ({ page }) => {
-    // Каждая карточка дня недели также содержит <select> с опциями всех 7
-    // дней (WorkingHourForm), поэтому фильтр по тексту "Пн" на div совпал
-    // бы со всеми 7 карточками — вместо этого берём заголовок с точным
-    // текстом "Пн" и поднимаемся к его родителю (карточка конкретного дня).
-    const mondayCard = page.getByRole("heading", { name: "Пн", exact: true }).locator("..");
-    const timeInputs = mondayCard.locator('input[type="time"]');
-    await timeInputs.nth(0).fill("09:00");
-    await timeInputs.nth(1).fill("13:00");
+    // Раньше карточка бралась через getByRole("heading", {name:"Пн"}).locator("..")
+    // — подъём к родителю через ".." хрупок к структуре разметки (любая
+    // обёртка вокруг заголовка тихо ломает локатор без явной ошибки) и не
+    // виден в отчёте как относящийся к конкретному дню. Карточка каждого дня
+    // теперь несёт стабильный data-testid (app/admin/schedule/page.tsx),
+    // не зависящий ни от локализованного текста, ни от порядка/вложенности
+    // элементов внутри неё.
+    const mondayCard = page.getByTestId("working-hours-day-0");
+    await expect(mondayCard).toBeVisible();
+    await expect(mondayCard.getByRole("button", { name: "Добавить интервал" })).toBeVisible();
+
+    // seed.sql намеренно не создаёт working_hours ни для одного дня (см.
+    // комментарий в файле) — на только что применённой миграциями+seed базе
+    // понедельник гарантированно пуст, поэтому новый интервал не может
+    // пересечься с уже существующим и не зависит от production-расписания.
+    await mondayCard.locator('input[name="startTime"]').fill("09:00");
+    await mondayCard.locator('input[name="endTime"]').fill("13:00");
     await mondayCard.getByRole("button", { name: "Добавить интервал" }).click();
 
+    // Проверяем реально сохранённое состояние (интервал в списке карточки
+    // после router.refresh()), а не промежуточный/исчезающий toast.
     await expect(mondayCard.getByText("09:00–13:00")).toBeVisible();
   });
 
