@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Ни одна из переменных ниже не является рабочим секретом — это
+# плейсхолдеры, нужные только потому, что lib/env.ts (Zod) требует полный
+# набор переменных при любом обращении к process.env (typecheck/build
+# используют модули, которые их импортируют). CI не использует
+# production secrets ни здесь, ни в одной из jobs ниже.
+env:
+  NEXT_PUBLIC_APP_URL: http://localhost:3000
+  NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_placeholder_0000000000
+  SUPABASE_SECRET_KEY: sb_secret_ci_placeholder_00000000000000000000
+  TELEGRAM_BOT_TOKEN: "000000:ci-placeholder-token"
+  TELEGRAM_BOT_USERNAME: ci_placeholder_bot
+  TELEGRAM_WEBHOOK_SECRET: ci_placeholder_webhook_secret_000000
+  CRON_SECRET: ci-placeholder-cron-secret-00000000
+
+jobs:
+  # Обязательная job (раздел 16 ТЗ Этапа 4): lint, typecheck, unit-тесты,
+  # production build. PR не должен считаться готовым, если она падает.
+  lint-typecheck-unit-build:
+    name: Lint, typecheck, unit tests, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Build
+        run: npm run build
+
+  # Отдельная job: SQL/pgTAP + integration-тесты на обычном PostgreSQL —
+  # тот же подход, что и scripts/test-sql.sh локально (см. README, раздел
+  # "Локальная проверка миграций"): local_bootstrap.sql создаёт
+  # anon/authenticated/service_role и заглушку схемы auth, реальный
+  # Supabase-проект их уже предоставляет. Обязательная job.
+  sql-and-integration:
+    name: SQL/pgTAP + integration tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bookingbot_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install pgTAP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16-pgtap
+
+      - name: SQL / pgTAP tests
+        run: npm run test:sql
+
+      - name: Integration tests
+        run: npm run test:integration
+
+  # Проверка через настоящий Supabase CLI: применяет все миграции +
+  # seed.sql "с нуля" на реальном локальном Supabase-стеке (Docker,
+  # доступен на стандартных GitHub-hosted runners). Ловит проблемы,
+  # которые bare-PostgreSQL проверка выше в принципе не видит (например,
+  # специфичное для Supabase поведение). --local гарантирует, что это
+  # никогда не может задеть production-проект; секреты не нужны.
+  supabase-db-reset:
+    name: supabase db reset (Supabase CLI, local stack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: supabase db reset --local
+        run: supabase db reset --local
+
+  # Необязательная job (раздел 16 ТЗ: "Playwright можно вынести в
+  # отдельную job"): полный E2E-прогон против настоящего локального
+  # Supabase Auth. continue-on-error — падение здесь не блокирует PR,
+  # в отличие от job'ов выше.
+  playwright:
+    name: Playwright E2E (local Supabase stack)
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck-unit-build]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+
+      - run: npm ci
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: supabase start
+        run: supabase start
+
+      - name: Read local Supabase connection details
+        id: supabase_status
+        run: |
+          supabase status -o json > /tmp/supabase-status.json
+          {
+            echo "url=$(jq -r '.API_URL' /tmp/supabase-status.json)"
+            echo "anon_key=$(jq -r '.ANON_KEY' /tmp/supabase-status.json)"
+            echo "service_role_key=$(jq -r '.SERVICE_ROLE_KEY' /tmp/supabase-status.json)"
+            echo "db_url=$(jq -r '.DB_URL' /tmp/supabase-status.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        env:
+          E2E_SUPABASE_URL: ${{ steps.supabase_status.outputs.url }}
+          E2E_SUPABASE_SERVICE_ROLE_KEY: ${{ steps.supabase_status.outputs.service_role_key }}
+          E2E_SUPABASE_PUBLISHABLE_KEY: ${{ steps.supabase_status.outputs.anon_key }}
+          TEST_DATABASE_URL: ${{ steps.supabase_status.outputs.db_url }}
+        run: npm run test:e2e
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
