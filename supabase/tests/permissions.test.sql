@@ -25,6 +25,17 @@ insert into auth.users (id) values
 insert into public.admin_users (user_id) values
   ('00000000-0000-0000-0000-000000000001');
 
+-- Число строк в services на момент старта теста зависит от того, чем
+-- заполнен supabase/seed.sql (демонстрационный каталог услуг и т.п.), а
+-- не является константой самого теста — поэтому baseline снимается
+-- динамически, а не зашивается числом.
+create temporary table _pre_existing_services_count as
+  select count(*)::int as n from public.services;
+-- Читается ниже под ролями authenticated/service_role (через set role),
+-- поэтому нужен явный GRANT — это тестовая временная таблица внутри
+-- откатываемой транзакции, а не изменение прав на реальных объектах схемы.
+grant select on _pre_existing_services_count to authenticated, service_role;
+
 insert into public.services (id, name, duration_minutes, price_cents, is_active) values
   ('00000000-0000-0000-0000-0000000000a1', 'Консультация', 60, 200000, true);
 
@@ -235,7 +246,7 @@ select is(
 );
 select is(
   (select count(*)::int from public.services),
-  1,
+  (select n from _pre_existing_services_count) + 1,
   'администратор видит услуги'
 );
 select lives_ok(
@@ -291,7 +302,7 @@ set role service_role;
 
 select is(
   (select count(*)::int from public.services),
-  1,
+  (select n from _pre_existing_services_count) + 1,
   'service_role видит услуги напрямую (обходит RLS, но у него есть GRANT SELECT)'
 );
 select lives_ok(
