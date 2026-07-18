@@ -20,7 +20,7 @@ dropdb --if-exists "$db_name"
 createdb "$db_name"
 
 echo "==> Применяю local_bootstrap.sql (роли + заглушка auth — только для локальных тестов)"
-psql -v ON_ERROR_STOP=1 -d "$db_name" -f supabase/tests/local_bootstrap.sql
+psql -v ON_ERROR_STOP=1 -d "$db_name" -f scripts/sql/local_bootstrap.sql
 
 echo "==> Применяю миграции"
 for f in supabase/migrations/*.sql; do

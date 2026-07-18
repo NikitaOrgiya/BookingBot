@@ -1,11 +1,12 @@
-const FEATURES = [
+const READY_FEATURES = [
   "Выбор услуги и даты прямо в Telegram",
   "Показ только реально свободных слотов",
   "Защита от двойного бронирования на уровне PostgreSQL",
-  "Напоминания клиентам перед визитом",
   "Отмена записи клиентом в разрешённый срок",
-  "Административная панель для услуг, расписания и записей",
+  "Административная панель: записи, услуги, расписание, настройки",
 ];
+
+const PLANNED_FEATURES = ["Автоматические напоминания клиентам перед визитом"];
 
 const STACK = [
   "Next.js",
@@ -18,6 +19,11 @@ const STACK = [
   "Vitest",
   "Playwright",
 ];
+
+const TELEGRAM_BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME;
+const telegramBotUrl = TELEGRAM_BOT_USERNAME
+  ? `https://t.me/${TELEGRAM_BOT_USERNAME}`
+  : undefined;
 
 export default function Home() {
   return (
@@ -33,30 +39,50 @@ export default function Home() {
             управляет услугами и расписанием через защищённую панель.
           </p>
           <div className="flex flex-col items-center gap-3 sm:flex-row sm:items-start">
-            <span
-              className="flex h-11 w-full items-center justify-center rounded-full bg-zinc-300 px-5 text-sm font-medium text-zinc-600 sm:w-auto dark:bg-zinc-800 dark:text-zinc-400"
-              title="Бот ещё не опубликован"
+            {telegramBotUrl ? (
+              <a
+                href={telegramBotUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex h-11 w-full items-center justify-center rounded-full bg-zinc-950 px-5 text-sm font-medium text-white sm:w-auto dark:bg-zinc-50 dark:text-zinc-950"
+              >
+                Открыть Telegram-бот
+              </a>
+            ) : null}
+            <a
+              href="/login"
+              className="flex h-11 w-full items-center justify-center rounded-full border border-zinc-300 px-5 text-sm font-medium text-zinc-700 sm:w-auto dark:border-zinc-700 dark:text-zinc-300"
             >
-              Открыть Telegram-бот (скоро)
-            </span>
-            <span
-              className="flex h-11 w-full items-center justify-center rounded-full border border-zinc-300 px-5 text-sm font-medium text-zinc-500 sm:w-auto dark:border-zinc-700 dark:text-zinc-500"
-              title="Административная панель ещё в разработке"
-            >
-              Вход в панель администратора (скоро)
-            </span>
+              Вход в панель администратора
+            </a>
           </div>
         </header>
 
         <section className="flex flex-col gap-4">
           <h2 className="text-xl font-semibold text-zinc-950 dark:text-zinc-50">
-            Возможности
+            Что уже работает
           </h2>
           <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {FEATURES.map((feature) => (
+            {READY_FEATURES.map((feature) => (
               <li
                 key={feature}
                 className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300"
+              >
+                {feature}
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="flex flex-col gap-4">
+          <h2 className="text-xl font-semibold text-zinc-950 dark:text-zinc-50">
+            В разработке
+          </h2>
+          <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {PLANNED_FEATURES.map((feature) => (
+              <li
+                key={feature}
+                className="rounded-lg border border-dashed border-zinc-300 p-4 text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-500"
               >
                 {feature}
               </li>
@@ -81,7 +107,7 @@ export default function Home() {
         </section>
 
         <footer className="mt-auto flex flex-col gap-2 border-t border-zinc-200 pt-6 text-sm text-zinc-500 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800 dark:text-zinc-500">
-          <p>Проект находится в активной разработке.</p>
+          <p>Портфолио-проект. Часть возможностей ещё в разработке.</p>
           <a
             href="https://github.com/nikitaorgiya/bookingbot"
             target="_blank"

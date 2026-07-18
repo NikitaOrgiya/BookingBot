@@ -15,6 +15,7 @@
     "test:unit": "vitest run",
     "test:sql": "bash scripts/test-sql.sh",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:e2e": "playwright test",
     "test:all": "npm run test:unit && npm run test:sql && npm run test:integration",
     "telegram:webhook:info": "node --env-file=.env.local scripts/telegram/webhook.mjs info",
     "telegram:webhook:set": "node --env-file=.env.local scripts/telegram/webhook.mjs set",
@@ -22,6 +23,7 @@
     "telegram:commands:set": "node --env-file=.env.local scripts/telegram/commands.mjs"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.6",
     "grammy": "^1.44.0",
     "next": "16.2.10",
@@ -31,6 +33,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^24",
     "@types/pg": "^8.20.0",

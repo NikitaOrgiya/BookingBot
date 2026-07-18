@@ -107,33 +107,88 @@ Telegram-бот для онлайн-записи клиентов с админ�
 
 Подробности — в разделе "Этап 3: Telegram-бот" ниже.
 
-**Намеренно не реализовано пока:** административная панель, авторизация,
-напоминания. Эти части будут добавлены на следующих этапах согласно
-техническому заданию.
+**Этап 4: авторизация и административная панель** — готово. GitHub Actions
+CI #5 (все 4 обязательные job) прошёл зелёным, миграции этапа применены к
+удалённой (remote) Supabase-базе и совпадают с локальными, Preview
+Deployment проверен вручную (вход администратора, услуги, расписание,
+блокировки, настройки, записи — работают) — см. "Результаты проверки" в
+конце этого раздела.
+
+- `@supabase/ssr` вместо устаревшего `@supabase/auth-helpers-nextjs`: три
+  разных клиента (`lib/supabase/browser-client.ts`,
+  `lib/supabase/auth-server-client.ts`, `lib/supabase/proxy-client.ts`) —
+  ни один из них не смешивается с service-role клиентом
+  (`lib/supabase/server-client.ts`);
+- `proxy.ts` в корне проекта (Next.js 16 заменил `middleware.ts` на
+  `proxy.ts`) — только обновляет cookie сессии, не выполняет бизнес-
+  авторизацию;
+- `lib/auth/require-admin.ts` — единственный источник истины "администратор
+  ли пользователь", вызывается на каждой странице `app/admin/**` и в каждом
+  административном Server Action; proxy эту проверку не заменяет;
+- `/login` (email + пароль, без публичной регистрации), безопасный отказ
+  неадминистратору, выход;
+- новые миграции (`supabase/migrations/20260717*.sql`): безопасная функция
+  `public.admin_change_appointment_status()` вместо широкого `UPDATE
+  appointments` для `authenticated`; `DELETE` на `services` отозван у
+  `authenticated` (только активация/деактивация); exclusion constraint
+  против пересекающихся активных `working_hours`; `CHECK`-валидация
+  `business_settings` (непустое имя, настоящий IANA timezone);
+  `public.admin_create_schedule_block()` / `admin_update_schedule_block()` /
+  `admin_preview_schedule_block_conflicts()` — локальное время блокировки
+  преобразуется в `timestamptz` внутри PostgreSQL, а не в браузере/Vercel;
+- корректирующая миграция `20260718100000_admin_schedule_block_immutability.sql`:
+  `admin_update_schedule_block()` и новая `admin_delete_schedule_block()`
+  запрещают менять/удалять уже наступившую блокировку
+  (`PAST_SCHEDULE_BLOCK_IMMUTABLE`) — иначе история расписания могла бы
+  быть переписана задним числом; прямой `DELETE` на `schedule_blocks`
+  отозван у `authenticated`, панель удаляет блокировки только через RPC;
+- страницы панели: dashboard, записи (фильтры, сортировка, пагинация,
+  смена статуса), услуги (без физического удаления), расписание (недельные
+  интервалы + разовые блокировки), настройки организации;
+- unit/SQL/integration/Playwright-тесты нового функционала.
+
+Подробности — в разделе "Этап 4: авторизация и административная панель"
+ниже.
+
+**Намеренно не реализовано пока:** автоматические напоминания клиентам и
+связанный с ними cron. Появятся на следующем этапе согласно техническому
+заданию.
+
+## Production
+
+- Production URL: https://booking-bot-gules.vercel.app
+- Telegram-бот: [@booking_service_nk_bot](https://t.me/booking_service_nk_bot)
 
 ## Технологический стек
 
 - Next.js (App Router) + React + TypeScript (strict)
 - Tailwind CSS
-- Supabase: PostgreSQL, Auth, Row Level Security
+- Supabase: PostgreSQL, Auth (`@supabase/ssr`), Row Level Security
 - Telegram Bot API (grammY)
 - Zod — валидация всех внешних данных
-- Vitest — unit-тесты
-- Playwright — E2E-тесты (появятся позже)
+- Vitest — unit- и integration-тесты
+- Playwright — E2E-тесты административной панели
 - GitHub Actions + Vercel
 
 ## Структура каталогов
 
 ```text
 app/                    Next.js App Router: страницы и API-роуты
-  login/                страница входа администратора (заглушка)
-  admin/                административная панель (заглушка)
+  login/                страница входа администратора (page.tsx, actions.ts)
+  admin/                административная панель (layout.tsx с requireAdmin(),
+                          loading.tsx, error.tsx, page.tsx — dashboard)
+    appointments/         список/фильтры/смена статуса записей
+    services/             каталог услуг (создание/изменение/активность)
+    schedule/              недельное расписание + разовые блокировки
+    settings/              настройки организации
   api/telegram/webhook/  Telegram webhook (Route Handler, POST-only)
-  api/cron/reminders/    endpoint напоминаний (заглушка)
+  api/cron/reminders/    endpoint напоминаний (заглушка — Этап 5)
 
 components/
-  admin/                компоненты админ-панели
-  ui/                   переиспользуемые UI-компоненты
+  admin/                компоненты админ-панели (sidebar, mobile-navigation,
+                          status-badge, appointment-filters/table,
+                          service-form, working-hours-form,
+                          schedule-block-form, settings-form, action-button)
 
 lib/
   booking/              логика доступности и бронирования
@@ -144,9 +199,20 @@ lib/
                           handlers/ (commands.ts, callbacks.ts),
                           repositories/ (telegram-users, booking-sessions,
                           services, appointments, business-settings)
-  supabase/              клиенты Supabase
-  auth/                  проверка прав администратора
+  admin/                 доменная логика панели: schemas.ts (Zod форм),
+                          appointment-status.ts (допустимые переходы),
+                          date-time.ts (границы дня/недели в timezone
+                          бизнеса, IANA-валидация), errors.ts (доменные
+                          коды административных RPC), business-settings.ts
+  supabase/              клиенты Supabase: public-client (anon, легаси),
+                          server-client (service-role, только бот/cron),
+                          browser-client / auth-server-client /
+                          proxy-client (`@supabase/ssr`, JWT пользователя)
+  auth/                  require-admin.ts — проверка прав администратора
   env.ts                 Zod-валидация переменных окружения
+
+proxy.ts                 Next.js 16: обновление cookie сессии Supabase Auth
+                          (замена устаревшего middleware.ts)
 
 scripts/
   test-sql.sh            прогон SQL/pgTAP-тестов на локальной базе
@@ -154,17 +220,18 @@ scripts/
 
 supabase/
   migrations/            SQL-миграции
-  seed.sql               стартовые данные (business_settings)
+  seed.sql               стартовые данные (business_settings, демо-каталог услуг)
   tests/                 SQL-тесты безопасности (pgTAP)
 
 tests/
   unit/                  Vitest
   integration/           интеграционные тесты
-  e2e/                   Playwright
+  e2e/                   Playwright (global-setup.ts, env.ts, helpers.ts,
+                          *.spec.ts, README.md)
 ```
 
-Папки, ещё не наполненные кодом на этом этапе, сохранены в Git через
-файлы `.gitkeep`, чтобы зафиксировать целевую структуру проекта.
+`api/cron/reminders/` пока остаётся заглушкой (`.gitkeep`) — напоминания
+не реализованы на этом этапе (см. "Дальнейшие этапы").
 
 ## Работа с переменными окружения
 
@@ -358,20 +425,50 @@ revoke all on all tables in schema public from authenticated;
 |---|---|---|---|
 | `admin_users` | — | — | — (только через `is_admin()`) |
 | `business_settings` | — | SELECT, UPDATE | SELECT |
-| `services` / `working_hours` / `schedule_blocks` | — | SELECT, INSERT, UPDATE, DELETE | SELECT |
+| `services` | — | SELECT, INSERT, UPDATE | SELECT |
+| `working_hours` | — | SELECT, INSERT, UPDATE, DELETE | SELECT |
+| `schedule_blocks` | — | SELECT, INSERT, UPDATE | SELECT |
 | `telegram_users` | — | SELECT | SELECT, INSERT, UPDATE |
 | `booking_sessions` | — | — | SELECT, INSERT, UPDATE, DELETE |
-| `appointments` | — | SELECT, UPDATE | SELECT, INSERT, UPDATE |
+| `appointments` | — | SELECT | SELECT, INSERT, UPDATE |
 | `processed_telegram_updates` | — | — | SELECT, INSERT |
 | `notification_deliveries` | — | SELECT | SELECT, INSERT, UPDATE |
 
 `anon` не имеет доступа ни к одной рабочей таблице: Telegram-бот и cron
 работают через `service_role` на сервере, а не через анонимный ключ.
-`authenticated` (администратор в панели) не может ни создать запись, ни
-удалить её напрямую — только через `SELECT`/`UPDATE`, с обязательной
-проверкой `public.is_admin()` в каждой RLS-политике. `service_role`
-использует `BYPASSRLS`, но это не освобождает его от `GRANT` — привилегии
-выданы явно для каждой таблицы, которая ему реально нужна.
+`service_role` использует `BYPASSRLS`, но это не освобождает его от
+`GRANT` — привилегии выданы явно для каждой таблицы, которая ему реально
+нужна.
+
+**Этап 4 сузил `authenticated` (администратор в панели) сильнее исходной
+таблицы выше — три отдельных изменения поверх Этапа 1:**
+
+- `appointments`: `UPDATE` **отозван** целиком
+  (`20260717090000_admin_change_appointment_status.sql`). Статус записи
+  меняется только через `public.admin_change_appointment_status()`
+  (`SECURITY DEFINER`, проверяет `is_admin()` сама, разрешает только
+  `confirmed → {completed, cancelled, no_show}`). Прямой `UPDATE
+  appointments` от `authenticated` теперь `permission denied` (42501)
+  даже для администратора.
+- `services`: `DELETE` **отозван**
+  (`20260717090100_services_restrict_delete.sql`). Физическое удаление
+  услуги невозможно ни через панель, ни напрямую через SQL от
+  `authenticated` — только активация/деактивация (`UPDATE is_active`).
+- `schedule_blocks`: `DELETE` **отозван**
+  (`20260718100000_admin_schedule_block_immutability.sql`, корректирующая
+  миграция). Блокировка удаляется только через
+  `public.admin_delete_schedule_block()`, которая (как и
+  `admin_update_schedule_block()`) отказывается менять/удалять уже
+  наступившую блокировку (`starts_at <= now()` →
+  `PAST_SCHEDULE_BLOCK_IMMUTABLE`) — историю расписания нельзя переписать
+  задним числом.
+
+Во всех трёх случаях RLS-политика, изначально опиравшаяся на снятый
+`GRANT`, тоже удалена/не задействуется — единственный путь к изменению
+теперь физически проходит через `SECURITY DEFINER`-функцию, которая сама
+проверяет `public.is_admin()`, а не полагается на то, что вызывающая роль
+и так admin (тот же принцип, что и у `public.is_admin()` для
+`admin_users`).
 
 `public.is_admin()` — `SECURITY DEFINER` функция с зафиксированным
 `search_path` и полными именами таблиц (чтобы вызывающая роль не могла
@@ -384,11 +481,18 @@ revoke all on all tables in schema public from authenticated;
 Мы работаем не в самом Supabase, а в обычном PostgreSQL, поэтому для
 локальных тестов нужно сначала создать роли `anon`/`authenticated`/
 `service_role` и заглушку схемы `auth` через
-`supabase/tests/local_bootstrap.sql` (в реальном Supabase-проекте они уже
+`scripts/sql/local_bootstrap.sql` (в реальном Supabase-проекте они уже
 есть — создавать их в `supabase/migrations/` нельзя, это ломает
 production-проект; там применяются только файлы из `supabase/migrations/`
 и `seed.sql`, например через `supabase db push`). Команда `npm run
 test:sql` (см. ниже) выполняет весь этот порядок автоматически.
+Файл намеренно лежит вне `supabase/tests/`: `supabase test db` (в
+job `supabase-db-reset`) прогоняет через `pg_prove` каждый `*.sql` файл
+из `supabase/tests/` как отдельный TAP-тест, и раньше принимал этот
+bootstrap-файл за тест, падая с "Parse errors: No plan found in TAP
+output" и "permission denied for schema auth" (в настоящем локальном
+Supabase-стеке схема `auth` уже существует и не принадлежит роли,
+которой выполняются тесты).
 
 ### SQL-тесты и настоящий конкурентный тест
 
@@ -419,7 +523,7 @@ Telegram update и повторное напоминание отклоняют�
 
 Команда `npm run test:sql` делает всё одним вызовом
 (`scripts/test-sql.sh`): пересоздаёт локальную базу `bookingbot_test`,
-накатывает `local_bootstrap.sql` + все миграции + `seed.sql`, ставит
+накатывает `scripts/sql/local_bootstrap.sql` + все миграции + `seed.sql`, ставит
 расширение `pgtap` и запускает `pg_prove` по всем `supabase/tests/*.test.sql`.
 Параметры подключения — из обычных переменных libpq (`PGHOST`, `PGPORT`,
 `PGUSER`, `PGPASSWORD`); по умолчанию используется локальный сокет текущего
@@ -447,7 +551,7 @@ npm run test:sql
 **60-75% `23P01` / 25-40% `40P01`**, ровно один победитель в каждом прогоне.
 
 Требуемая переменная окружения — `TEST_DATABASE_URL`: строка подключения к
-PostgreSQL с уже применёнными миграциями и `local_bootstrap.sql` (проще
+PostgreSQL с уже применёнными миграциями и `scripts/sql/local_bootstrap.sql` (проще
 всего — та же `bookingbot_test`, которую только что подготовил
 `npm run test:sql`). Роль в строке подключения должна иметь право
 выполнить `set role service_role` (суперпользователь — самый простой
@@ -1022,6 +1126,279 @@ supabase-js/PostgREST на `pg.Pool` с несколькими физическ�
 стабильный `SLOT_TAKEN`, ноль `INTERNAL_ERROR`, ровно одна запись в БД на
 слот.
 
+## Этап 4: авторизация и административная панель
+
+Цель этапа — чтобы владельцу бизнеса для повседневного управления
+BookingBot больше не был нужен Supabase Studio: вход, записи, услуги,
+расписание и настройки организации редактируются через собственную панель
+на `/admin/**`.
+
+### Supabase Auth SSR — три разных клиента
+
+Устаревший `@supabase/auth-helpers-nextjs` не используется — только
+актуальный `@supabase/ssr`. В проекте теперь четыре Supabase-клиента,
+каждый для своей задачи, и они **никогда не смешиваются**:
+
+| Клиент | Файл | Ключ | Где используется |
+|---|---|---|---|
+| Публичный (легаси) | `lib/supabase/public-client.ts` | publishable | не используется панелью |
+| Браузерный | `lib/supabase/browser-client.ts` | publishable | клиентские auth-действия |
+| Серверный SSR (пользовательский) | `lib/supabase/auth-server-client.ts` | publishable + JWT из cookie | Server Components/Actions панели |
+| Proxy | `lib/supabase/proxy-client.ts` | publishable | `proxy.ts` (обновление cookie) |
+| Service-role | `lib/supabase/server-client.ts` | secret | только Telegram-бот и локальный тестовый setup |
+
+Административная панель обращается к данным **исключительно** через
+`auth-server-client.ts` — с JWT реального авторизованного пользователя, а
+не секретным ключом. Это значит, что каждый запрос панели реально проходит
+через RLS-политики (`is_admin()` и т.д.), а не обходит их: баг в
+`requireAdmin()` не мог бы "случайно" открыть чужие данные, потому что
+последнее слово всё равно за базой данных, а не за проверкой в коде
+приложения.
+
+### Почему admin UI не использует service role
+
+Три причины:
+
+1. **Дефолт в пользу RLS.** Если бы панель читала данные через
+   `server-client.ts` (secret-ключ, обходит RLS), то единственной защитой
+   от "обычный пользователь увидел записи другого бизнеса/чужие данные"
+   был бы код приложения (`requireAdmin()`). Один пропущенный вызов на
+   одной странице — и утечка. С `auth-server-client.ts` этот же баг ничего
+   не даёт: RLS-политика (`using (public.is_admin())`) всё равно вернёт 0
+   строк неадминистратору, вне зависимости от того, что "забыл" сделать
+   код страницы.
+2. **Единая модель прав.** Telegram-бот и панель обращаются к БД
+   принципиально разными способами (service-role с полным доверием к
+   серверному коду vs. authenticated + RLS с проверкой на каждый запрос) —
+   смешивать их в одном клиенте означало бы, что баг в панели может
+   получить привилегии бота, и наоборот.
+3. **Явная граница ответственности.** `lib/supabase/server-client.ts`
+   импортирует `server-only` и физически не может попасть в клиентский код
+   — но ничто не мешало бы серверному коду панели ошибочно импортировать
+   именно его вместо `auth-server-client.ts`. Разные имена файлов и разные
+   директории (`lib/auth/require-admin.ts` использует только
+   `auth-server-client.ts`) делают такую путаницу видимой при код-ревью.
+
+### proxy.ts вместо middleware.ts
+
+Next.js 16 переименовал соглашение `middleware.ts` в `proxy.ts` (тот же
+API — файл в корне проекта, `export default` функция, `NextRequest` →
+`NextResponse`, опциональный `config.matcher`). `proxy.ts` в этом проекте:
+
+- обновляет access/refresh token cookie Supabase Auth на каждом подходящем
+  запросе (`supabase.auth.getUser()`, не `getSession()` — обращается к
+  серверу Auth и валидирует токен, а не просто читает claims из cookie);
+- **не выполняет бизнес-авторизацию** и не считает наличие cookie
+  доказательством административного доступа — это единственная задача
+  `requireAdmin()` (`lib/auth/require-admin.ts`), вызываемого отдельно на
+  каждой странице `app/admin/**` и в каждом административном Server
+  Action;
+- пропускает `api/telegram/webhook` и `api/cron/*` (они работают через
+  `service_role`/секретные токены, а не пользовательскую cookie-сессию), а
+  также статику.
+
+### requireAdmin()
+
+`lib/auth/require-admin.ts`:
+
+1. `supabase.auth.getUser()` — подтверждает пользователя у самого
+   Supabase Auth (не доверяет данным, пришедшим только из браузера);
+2. вызывает `public.is_admin()` через клиент с JWT именно этого
+   пользователя — тот же RLS/`SECURITY DEFINER` путь, каким пользуется
+   весь остальной проект, без отдельной "теневой" проверки прав в коде
+   приложения;
+3. любой не-администратор (в том числе валидный, но отсутствующий в
+   `admin_users` пользователь) получает `redirect("/login?error=forbidden")`
+   — `is_admin()` возвращает только `true`/`false` и не раскрывает
+   содержимое `admin_users`.
+
+`app/admin/layout.tsx` вызывает `requireAdmin()` и помечен
+`export const dynamic = "force-dynamic"` — административные страницы не
+кешируются и не генерируются статически как общедоступный контент.
+
+### `/login`
+
+`app/login/page.tsx` + `app/login/actions.ts`. Публичной регистрации нет
+(ни страницы, ни ссылки). Пароль нигде не логируется. Ошибка формы и
+ошибка "неверный email/пароль" от Supabase Auth сведены к одному сообщению
+(`invalid_credentials`) — иначе поведение раскрывало бы, существует ли
+такой email. Авторизованный администратор, открывший `/login`, сразу
+перенаправляется в `/admin`; авторизованный, но не-администратор
+получает отдельное сообщение (`forbidden`) и разлогинивается — сессия
+панели не остаётся висеть у пользователя, которому там нечего делать.
+
+### Новые административные RPC (миграции `20260717*`)
+
+Как и в Этапе 2, каждая функция — фиксированный `search_path`, полные имена
+объектов, `REVOKE ALL` + точечный `GRANT EXECUTE`, стабильные доменные
+коды ошибок (`lib/admin/errors.ts`).
+
+- **`public.admin_change_appointment_status(id, new_status, reason)`** —
+  единственный способ изменить статус записи. До этой миграции
+  `authenticated` имел широкий `UPDATE` на `appointments`; теперь этот
+  `GRANT` отозван (`revoke update on table public.appointments from
+  authenticated`), а политика `appointments_admin_update` удалена как
+  структурно бесполезная. Функция (`SECURITY DEFINER`) сама проверяет
+  `is_admin()`, блокирует строку `FOR UPDATE`, разрешает только
+  `confirmed → {completed, cancelled, no_show}` (никаких обратных или
+  произвольных переходов), при отмене заполняет `cancelled_at`/
+  `cancel_reason`, не даёт менять клиента/время/услугу/snapshot-поля.
+- **Услуги:** `DELETE` отозван у `authenticated`
+  (`20260717090100_services_restrict_delete.sql`) — физическое удаление
+  услуги невозможно на уровне базы, не только на уровне UI; единственный
+  способ "убрать" услугу — деактивировать (`is_active = false`), история
+  `appointments` (snapshot-поля) не зависит от текущего состояния услуги.
+- **`working_hours_no_overlap_active`** — exclusion constraint (GiST,
+  `btree_gist`) запрещает пересекающиеся **активные** интервалы одного дня
+  недели. Перед добавлением constraint миграция
+  (`20260717090200_working_hours_no_overlap.sql`) сама ищет существующие
+  конфликты и, если находит, падает с понятным сообщением и точным списком
+  пар `id` вместо того, чтобы попытаться исправить данные автоматически —
+  исправление всегда ручное (деактивировать один из интервалов или
+  изменить его границы).
+- **`business_settings`**: `public.is_valid_timezone()` (пробует `now() at
+  time zone tz`, ловит исключение) + `CHECK` на настоящий IANA-идентификатор
+  и на непустое `business_name`
+  (`20260717090300_business_settings_validation.sql`).
+- **`public.admin_create_schedule_block` / `admin_update_schedule_block`**
+  — локальные дата + время блокировки преобразуются в `timestamptz`
+  **внутри PostgreSQL**, читая `business_settings.timezone`, а не в
+  браузере администратора или на сервере Vercel (иначе малейшее расхождение
+  часовых поясов создало бы блокировку "не в то время").
+  **`admin_preview_schedule_block_conflicts`** — чистое чтение,
+  возвращает подтверждённые будущие записи, пересекающиеся с
+  предполагаемой блокировкой; панель показывает это как предупреждение и
+  требует явного подтверждения (чекбокс) перед сохранением, если конфликт
+  есть — существующие `appointments` при этом не отменяются автоматически
+  (осознанное решение MVP).
+
+### Страницы панели
+
+- **Dashboard** (`/admin`) — подтверждённые записи сегодня, записи и
+  отменённые за текущую неделю, ближайшие записи, быстрые ссылки. Границы
+  "сегодня"/"неделя" считаются в `business_settings.timezone`
+  (`lib/admin/date-time.ts`), а не в timezone браузера/Vercel. Только
+  счётчики (`count: "exact", head: true`) и один короткий список — без
+  чтения всей таблицы `appointments`.
+- **Записи** (`/admin/appointments`) — дата/время в timezone организации,
+  snapshot услуги/длительности/цены, клиент (имя, `username`, Telegram ID),
+  статус, заметка; фильтры (диапазон дат, статус, имя, username, Telegram
+  ID), сортировка по времени, пагинация (20/страница). Статус меняется
+  только через `admin_change_appointment_status`; отмена требует
+  подтверждения; панель никогда не удаляет запись, не меняет время,
+  клиента или snapshot услуги, не создаёт запись вручную.
+- **Услуги** (`/admin/services`) — создание/изменение, активация/
+  деактивация, порядок отображения. Цена вводится в рублях, в базу
+  сохраняется в копейках (`lib/admin/schemas.ts: rublesToCents`). Кнопки
+  "Удалить" нет — физическое удаление не реализовано ни в UI, ни на уровне
+  прав БД.
+- **Расписание** (`/admin/schedule`) — недельные интервалы (несколько в
+  день, `0 = понедельник`) с активацией/деактивацией/удалением;
+  пересечение активных интервалов отклоняется constraint'ом БД, ошибка
+  показывается понятным сообщением. Разовые блокировки — локальные
+  дата/время + причина, полный день или часть дня, предупреждение о
+  пересечении с записями перед сохранением, список предстоящих блокировок,
+  изменение/удаление будущих.
+- **Настройки** (`/admin/settings`) — название, IANA timezone (с
+  обязательным дополнительным подтверждением при изменении и явным
+  пояснением, что абсолютный момент времени существующих записей не
+  меняется, а вот отображаемое локальное время — да), горизонт
+  бронирования, сроки уведомления/отмены, шаг слотов, поля напоминаний
+  (редактируются, но помечены "Будет использоваться после подключения
+  напоминаний" — сами напоминания на этом этапе не реализованы).
+
+Изменения на этих страницах применяются немедленно: Telegram-бот и
+`get_available_slots`/`reserve_appointment` читают те же таблицы напрямую,
+без кеша и без necessity передеплоя.
+
+### Создание первого production-администратора
+
+Публичной регистрации нет — первый (и любой следующий) администратор
+создаётся вручную:
+
+1. Supabase Dashboard → Authentication → Users → **Add user** (email +
+   пароль; либо пригласительное письмо, если в проекте настроен SMTP).
+   Скопируйте `UUID` созданного пользователя.
+2. Supabase Dashboard → SQL Editor, под ролью с доступом к записи в
+   `public.admin_users` (например, через `service_role`/postgres-подключение
+   в панели Supabase, **не** через саму административную панель — она
+   намеренно не предоставляет UI для назначения администраторов):
+
+   ```sql
+   insert into public.admin_users (user_id) values ('<UUID пользователя>');
+   ```
+3. Войдите на `/login` этими email/паролем — `is_admin()` теперь вернёт
+   `true`, панель откроется.
+
+Отозвать доступ — `delete from public.admin_users where user_id =
+'<UUID>';` (сам пользователь Supabase Auth при этом не удаляется).
+
+### Локальный запуск auth для разработки
+
+Полноценный локальный Supabase (Auth/GoTrue) требует Docker
+(`supabase start`). Если Docker недоступен (как в некоторых песочницах
+CI/агентов), автоматические тесты, не зависящие от реального Auth
+(unit/SQL/pgTAP/integration через `pg`), по-прежнему работают в обычном
+PostgreSQL — см. "SQL-тесты и настоящий конкурентный тест" выше. Для
+ручной проверки UI входа/панели в браузере нужен один из двух вариантов:
+
+- `supabase start` (локальный полный стек с Auth) + `supabase db reset`,
+  затем создать локального тестового администратора тем же способом, что
+  и в production (см. выше), но через `http://127.0.0.1:54321`;
+- либо реальный (staging/production) Supabase-проект с уже настроенным
+  `.env.local` (см. `.env.example`).
+
+### Playwright
+
+`@playwright/test` — конфигурация в `playwright.config.ts`, спецификации в
+`tests/e2e/` (12 сценариев: неавторизованный доступ, неверный пароль,
+отказ неадминистратору, вход/выход, dashboard, CRUD и деактивация услуг,
+рабочие интервалы, разовые блокировки, фильтрация записей, смена
+статуса). Тестовые пользователи (администратор и не-администратор) для
+E2E создаются автоматически и **только** в локальном Supabase-стеке —
+`tests/e2e/global-setup.ts` явно отказывается запускаться, если
+`E2E_SUPABASE_URL` не похож на `127.0.0.1`/`localhost` (см.
+`tests/e2e/README.md`). Production Supabase и реальные записи в E2E
+никогда не используются.
+
+**Поведение при отсутствии локального Supabase-стека зависит от
+`process.env.CI`:**
+
+- **В CI** (`.github/workflows/ci.yml`, job `playwright`) — это ошибка
+  конфигурации, а не повод пропустить тесты: `tests/e2e/env.ts`
+  бросает исключение вместо `test.skip`, job дополнительно сама
+  проверяет, что `supabase status` реально вернула URL/ключи (иначе
+  падает раньше, до попытки запустить тесты), а после прогона отдельный
+  шаг разбирает JSON-отчёт Playwright и требует `skipped = 0`,
+  `failed = 0` и выполнение всех ожидаемых сценариев — падение или
+  пропуск любого теста блокирует Pull Request.
+- **При ручном локальном запуске** без Docker/Supabase — это
+  единственный разрешённый случай `test.skip`, чтобы разработчик без
+  локального Supabase-стека не был заблокирован (см. `tests/e2e/README.md`).
+
+```bash
+npx playwright install --with-deps chromium   # один раз (если браузер ещё не установлен)
+npm run test:e2e
+```
+
+### Результаты проверки (заполнено по факту зелёного прогона)
+
+| Проверка | Результат |
+|---|---|
+| `npm run lint` / `typecheck` / `test:unit` / `build` | unit — 209/209 |
+| SQL/pgTAP + integration (bare PostgreSQL) | pgTAP — 183/183, integration — 50/50 |
+| `supabase start` + `supabase db reset --local` + `supabase test db` | success |
+| Playwright E2E (12 сценариев, реальный локальный Supabase Auth в CI) | 12 passed, 0 failed, 0 skipped |
+| GitHub Actions run | CI #5 — все 4 обязательные job success |
+| Миграции этапа 4 на удалённой (remote) Supabase-базе | применены; local и remote migrations совпадают |
+| Preview Deployment | проверен вручную: вход администратора, услуги, расписание, блокировки, настройки и записи работают |
+
+Статус этапа выше — "готово": все 4 обязательные CI job (lint/typecheck/
+unit/build, SQL+integration, `supabase db reset`+pgTAP, Playwright E2E)
+прошли зелёными без единого пропущенного или упавшего теста, миграции
+подтверждены на удалённой базе, а панель проверена вручную на Preview
+Deployment.
+
 ## Локальный запуск
 
 Требуется Node.js 24 LTS версии из `.nvmrc` (используйте `nvm use`); та же
@@ -1045,6 +1422,7 @@ npm run test               # unit-тесты (алиас test:unit)
 npm run test:unit          # unit-тесты (Vitest, tests/unit)
 npm run test:sql           # SQL/pgTAP-тесты на локальной базе (нужен PostgreSQL + pgtap)
 npm run test:integration   # настоящий конкурентный тест (нужен TEST_DATABASE_URL)
+npm run test:e2e          # Playwright (нужен локальный Supabase-стек, см. tests/e2e/README.md)
 npm run test:all           # test:unit && test:sql && test:integration
 npm run build               # production build
 
@@ -1067,10 +1445,18 @@ Telegram-бот".
    (`get_available_slots`, `reserve_appointment`, `cancel_appointment_by_client`).~~
    Готово.
 3. ~~Telegram-бот и клиентский сценарий записи.~~ Готово.
-4. Авторизация и административная панель.
+4. ~~Авторизация и административная панель~~ Готово (CI #5 зелёный, миграции
+   применены к удалённой базе, Preview Deployment проверен вручную — см.
+   "Результаты проверки" в разделе "Этап 4" выше).
 5. Напоминания.
-6. Полное тестирование (unit, SQL, integration, Playwright).
-7. CI/CD и деплой на Vercel.
+6. Полное тестирование (unit, SQL, integration, Playwright) — базовый набор
+   для Этапа 4 добавлен; продолжится на следующих этапах по мере роста
+   функциональности.
+7. CI/CD и деплой на Vercel — `.github/workflows/ci.yml` добавлен в рамках
+   Этапа 4, все 4 job (lint/typecheck/unit/build, SQL+integration,
+   `supabase db reset`+pgTAP, Playwright E2E) обязательны — падение или
+   пропуск любой из них блокирует Pull Request; автоматизация деплоя на
+   Vercel — отдельная задача.
 8. Финальное портфолио-оформление.
 
 Подробности каждого этапа — в техническом задании проекта.

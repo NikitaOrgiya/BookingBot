@@ -560,10 +560,21 @@ select throws_ok(
 );
 
 -- =====================================================================
--- 18. Пересекающиеся working_hours одного дня не должны давать дубли
---     слотов в get_available_slots (DISTINCT по slot_start/slot_end).
---     Используем отдельную услугу и день недели, не пересекающиеся с
---     остальными тестами файла.
+-- 18. Пересекающиеся working_hours одного дня. До Этапа 4 такое состояние
+--     было возможно вставить, и DISTINCT в get_available_slots по
+--     (slot_start, slot_end) защищал от дублей слотов именно на этот
+--     случай. С Этапа 4 (см. supabase/migrations/
+--     20260717090200_working_hours_no_overlap.sql,
+--     supabase/tests/admin_functions.test.sql) это состояние физически
+--     невозможно создать в БД — exclusion constraint
+--     working_hours_no_overlap_active отклоняет саму вставку. Тест ниже
+--     проверяет именно это (более сильную гарантию, чем раньше): DISTINCT
+--     в get_available_slots не удалён и остаётся защитой в глубину
+--     (функции ядра бронирования на этом этапе не меняются), но
+--     воспроизвести исходный сценарий "дубли от пересекающихся
+--     working_hours" через INSERT больше нельзя ни при каких правах,
+--     включая суперпользователя — constraint, в отличие от RLS, не
+--     обходится ни одной ролью.
 -- =====================================================================
 create temporary table tp2 as
 select
@@ -573,38 +584,28 @@ select
 insert into public.services (id, name, duration_minutes, price_cents, is_active) values
   ('00000000-0000-0000-0000-0000000000a4', 'Дубли слотов', 30, 100000, true);
 
--- Два пересекающихся интервала: 09:00-11:00 и 10:00-12:00 (пересечение
--- 10:00-11:00).
 insert into public.working_hours (weekday, start_time, end_time, is_active)
 select (select wd from tp2), '09:00', '11:00', true;
-insert into public.working_hours (weekday, start_time, end_time, is_active)
-select (select wd from tp2), '10:00', '12:00', true;
 
-select is(
-  (
-    select count(*)::int
-    from (
-      select slot_start, slot_end, count(*) as c
-      from public.get_available_slots(
-        '00000000-0000-0000-0000-0000000000a4',
-        (select d from tp2), (select d from tp2))
-      group by slot_start, slot_end
-      having count(*) > 1
-    ) as dupes
+select throws_ok(
+  format(
+    $$ insert into public.working_hours (weekday, start_time, end_time, is_active)
+       select %L::smallint, '10:00', '12:00', true $$,
+    (select wd from tp2)
   ),
-  0,
-  'пересекающиеся working_hours: ни одна пара (slot_start, slot_end) не повторяется'
+  '23P01', null,
+  'пересекающийся активный интервал того же дня отклоняется на уровне БД (working_hours_no_overlap_active, Этап 4) — дубли слотов от такого состояния больше невозможны'
 );
 
--- Явное количество: слоты каждые 15 мин, услуга 30 мин, объединённый
--- диапазон 09:00-12:00 (180 мин) -> старты 09:00..11:30 = 11 уникальных
--- слотов, несмотря на то что 10:00-11:00 порождается двумя интервалами.
+-- Единственный оставшийся (первый) интервал по-прежнему даёт корректное
+-- число уникальных слотов: 09:00-11:00 (120 мин), услуга 30 мин, шаг 15
+-- -> старты 09:00..10:30 = 7 слотов.
 select is(
   (select count(*)::int from public.get_available_slots(
      '00000000-0000-0000-0000-0000000000a4',
      (select d from tp2), (select d from tp2))),
-  11,
-  'пересекающиеся working_hours: корректное число уникальных слотов (11), а не дубли'
+  7,
+  'после отклонённой второй вставки: 7 уникальных слотов по интервалу 09:00-11:00 (30 мин, шаг 15), без дублей'
 );
 
 select * from finish();

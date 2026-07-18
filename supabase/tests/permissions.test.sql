@@ -76,7 +76,10 @@ select table_privs_are('public', 'business_settings', 'authenticated', '{SELECT,
 select table_privs_are('public', 'business_settings', 'service_role', '{SELECT}'::name[], 'service_role: SELECT на business_settings');
 
 select table_privs_are('public', 'services', 'anon', '{}'::name[], 'anon: 0 прав на services');
-select table_privs_are('public', 'services', 'authenticated', '{SELECT,INSERT,UPDATE,DELETE}'::name[], 'authenticated: полный CRUD на services');
+-- Этап 4 (20260717090100_services_restrict_delete.sql) отозвал DELETE:
+-- физическое удаление услуги невозможно даже администратору, только
+-- активация/деактивация (UPDATE is_active).
+select table_privs_are('public', 'services', 'authenticated', '{SELECT,INSERT,UPDATE}'::name[], 'authenticated: SELECT/INSERT/UPDATE на services, без DELETE (Этап 4)');
 select table_privs_are('public', 'services', 'service_role', '{SELECT}'::name[], 'service_role: SELECT на services');
 
 select table_privs_are('public', 'working_hours', 'anon', '{}'::name[], 'anon: 0 прав на working_hours');
@@ -84,7 +87,12 @@ select table_privs_are('public', 'working_hours', 'authenticated', '{SELECT,INSE
 select table_privs_are('public', 'working_hours', 'service_role', '{SELECT}'::name[], 'service_role: SELECT на working_hours');
 
 select table_privs_are('public', 'schedule_blocks', 'anon', '{}'::name[], 'anon: 0 прав на schedule_blocks');
-select table_privs_are('public', 'schedule_blocks', 'authenticated', '{SELECT,INSERT,UPDATE,DELETE}'::name[], 'authenticated: полный CRUD на schedule_blocks');
+-- Корректирующая миграция Этапа 4
+-- (20260718100000_admin_schedule_block_immutability.sql) отозвала DELETE:
+-- блокировка удаляется только через admin_delete_schedule_block(),
+-- которая проверяет, что блокировка ещё не наступила — проверено
+-- отдельно в supabase/tests/admin_functions.test.sql.
+select table_privs_are('public', 'schedule_blocks', 'authenticated', '{SELECT,INSERT,UPDATE}'::name[], 'authenticated: SELECT/INSERT/UPDATE на schedule_blocks, без DELETE (Этап 4)');
 select table_privs_are('public', 'schedule_blocks', 'service_role', '{SELECT}'::name[], 'service_role: SELECT на schedule_blocks');
 
 select table_privs_are('public', 'telegram_users', 'anon', '{}'::name[], 'anon: 0 прав на telegram_users');
@@ -96,7 +104,11 @@ select table_privs_are('public', 'booking_sessions', 'authenticated', '{}'::name
 select table_privs_are('public', 'booking_sessions', 'service_role', '{SELECT,INSERT,UPDATE,DELETE}'::name[], 'service_role: полный CRUD на booking_sessions');
 
 select table_privs_are('public', 'appointments', 'anon', '{}'::name[], 'anon: 0 прав на appointments');
-select table_privs_are('public', 'appointments', 'authenticated', '{SELECT,UPDATE}'::name[], 'authenticated: SELECT+UPDATE на appointments (без INSERT/DELETE)');
+-- Этап 4 (20260717090000_admin_change_appointment_status.sql) отозвал
+-- широкий UPDATE: статус меняется только через
+-- admin_change_appointment_status(), проверено отдельно в
+-- supabase/tests/admin_functions.test.sql.
+select table_privs_are('public', 'appointments', 'authenticated', '{SELECT}'::name[], 'authenticated: только SELECT на appointments, без UPDATE/INSERT/DELETE (Этап 4)');
 select table_privs_are('public', 'appointments', 'service_role', '{SELECT,INSERT,UPDATE}'::name[], 'service_role: SELECT+INSERT+UPDATE на appointments');
 
 select table_privs_are('public', 'processed_telegram_updates', 'anon', '{}'::name[], 'anon: 0 прав на processed_telegram_updates');
