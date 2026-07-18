@@ -131,7 +131,9 @@ export function SettingsForm({ settings }: { settings: SettingsFormValue }) {
 
       <div className="rounded-md border border-dashed border-zinc-300 p-3 dark:border-zinc-700">
         <p className="mb-3 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-          Будет использоваться после подключения напоминаний.
+          Определяют, за сколько минут до записи создаётся напоминание
+          (Этап 5). Фактическая отправка в Telegram включится после
+          активации cron владельцем проекта.
         </p>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <label className="flex flex-col gap-1 text-sm">

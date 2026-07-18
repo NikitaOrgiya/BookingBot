@@ -119,6 +119,13 @@ select table_privs_are('public', 'notification_deliveries', 'anon', '{}'::name[]
 select table_privs_are('public', 'notification_deliveries', 'authenticated', '{SELECT}'::name[], 'authenticated: только SELECT на notification_deliveries');
 select table_privs_are('public', 'notification_deliveries', 'service_role', '{SELECT,INSERT,UPDATE}'::name[], 'service_role: SELECT+INSERT+UPDATE на notification_deliveries');
 
+-- appointment_reminders (Этап 5) — НОВАЯ отдельная таблица, не переименование
+-- notification_deliveries выше (см. комментарий в начале
+-- supabase/migrations/20260719100000_appointment_reminders.sql, почему).
+select table_privs_are('public', 'appointment_reminders', 'anon', '{}'::name[], 'anon: 0 прав на appointment_reminders');
+select table_privs_are('public', 'appointment_reminders', 'authenticated', '{SELECT}'::name[], 'authenticated: только SELECT на appointment_reminders');
+select table_privs_are('public', 'appointment_reminders', 'service_role', '{SELECT,INSERT,UPDATE}'::name[], 'service_role: SELECT+INSERT+UPDATE на appointment_reminders');
+
 -- ---------------------------------------------------------------------
 -- 3. GRANT на функции: is_admin() выполняется только authenticated.
 -- ---------------------------------------------------------------------
@@ -175,13 +182,15 @@ select results_eq(
       and relname in (
         'admin_users', 'business_settings', 'services', 'working_hours',
         'schedule_blocks', 'telegram_users', 'booking_sessions',
-        'appointments', 'processed_telegram_updates', 'notification_deliveries'
+        'appointments', 'processed_telegram_updates', 'notification_deliveries',
+        'appointment_reminders'
       )
     order by relname
   $$,
   $$
     values
       ('admin_users'::text collate "C", true, false),
+      ('appointment_reminders', true, true),
       ('appointments', true, true),
       ('booking_sessions', true, true),
       ('business_settings', true, true),
@@ -505,7 +514,11 @@ select is(
 );
 
 -- 13. Одно и то же напоминание нельзя запланировать дважды для одной
---     записи: unique (appointment_id, notification_type).
+--     записи: unique (appointment_id, notification_type) на исходной,
+--     нетронутой notification_deliveries (Этап 1, до сих пор ни разу не
+--     используемая приложением — см. supabase/migrations/
+--     20260719100000_appointment_reminders.sql, почему Этап 5 не
+--     переименовывает и не изменяет эту таблицу).
 select lives_ok(
   $$insert into public.notification_deliveries (appointment_id, notification_type, scheduled_for)
     select id, 'reminder_first', start_at - interval '1440 minutes'
@@ -515,6 +528,31 @@ select lives_ok(
 select throws_ok(
   $$insert into public.notification_deliveries (appointment_id, notification_type, scheduled_for)
     select id, 'reminder_first', start_at - interval '1440 minutes'
+    from public.appointments where start_at = '2026-07-20 14:30:00+03'$$,
+  '23505', null,
+  'повторное такое же напоминание отклоняется уникальным ограничением'
+);
+
+-- 13b. То же самое, но на НОВОЙ таблице appointment_reminders (Этап 5).
+--     Триггер Этапа 5 (create_appointment_reminders_for_confirmed, см.
+--     supabase/migrations/20260719100000_appointment_reminders.sql) уже
+--     создал строку '24h' для этой же записи в момент её подтверждения
+--     (INSERT появления appointments выше) — значит "первая" строка уже
+--     существует не потому, что мы её только что вставили вручную, а
+--     благодаря самому триггеру; тест проверяет именно это, прежде чем
+--     убедиться, что повторная (уже вручную) вставка того же типа
+--     отклоняется уникальным ограничением.
+select is(
+  (select count(*)::int
+     from public.appointment_reminders as ar
+     join public.appointments as a on a.id = ar.appointment_id
+    where a.start_at = '2026-07-20 14:30:00+03' and ar.reminder_type = '24h'),
+  1,
+  'триггер Этапа 5 уже создал напоминание 24h для записи в момент её подтверждения'
+);
+select throws_ok(
+  $$insert into public.appointment_reminders (appointment_id, reminder_type, scheduled_for)
+    select id, '24h', start_at - interval '1440 minutes'
     from public.appointments where start_at = '2026-07-20 14:30:00+03'$$,
   '23505', null,
   'повторное такое же напоминание отклоняется уникальным ограничением'
