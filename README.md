@@ -107,12 +107,12 @@ Telegram-бот для онлайн-записи клиентов с админ�
 
 Подробности — в разделе "Этап 3: Telegram-бот" ниже.
 
-**Этап 4: авторизация и административная панель** — реализован, ожидает
-CI/E2E и production smoke-test. Статус будет обновлён на "готово" только
-после того, как GitHub Actions реально прогонит и зафиксирует зелёными
-все обязательные job (lint/typecheck/unit/build, SQL+integration,
-`supabase db reset` + pgTAP, Playwright E2E без единого пропущенного или
-упавшего теста) — см. "Результаты проверки" в конце этого раздела.
+**Этап 4: авторизация и административная панель** — готово. GitHub Actions
+CI #5 (все 4 обязательные job) прошёл зелёным, миграции этапа применены к
+удалённой (remote) Supabase-базе и совпадают с локальными, Preview
+Deployment проверен вручную (вход администратора, услуги, расписание,
+блокировки, настройки, записи — работают) — см. "Результаты проверки" в
+конце этого раздела.
 
 - `@supabase/ssr` вместо устаревшего `@supabase/auth-helpers-nextjs`: три
   разных клиента (`lib/supabase/browser-client.ts`,
@@ -1381,19 +1381,23 @@ npx playwright install --with-deps chromium   # один раз (если бра
 npm run test:e2e
 ```
 
-### Результаты проверки (заполняется по факту, не заранее)
+### Результаты проверки (заполнено по факту зелёного прогона)
 
 | Проверка | Результат |
 |---|---|
-| `npm run lint` / `typecheck` / `test:unit` / `build` | см. отчёт в PR |
-| SQL/pgTAP + integration (bare PostgreSQL) | см. отчёт в PR |
-| `supabase start` + `supabase db reset --local` + `supabase test db` | см. отчёт в PR (GitHub Actions job `supabase-db-reset`) |
-| Playwright E2E (12 сценариев, реальный локальный Supabase Auth в CI) | см. отчёт в PR (GitHub Actions job `playwright`) |
-| GitHub Actions run | ссылка появится после первого прогона по этому PR |
+| `npm run lint` / `typecheck` / `test:unit` / `build` | unit — 209/209 |
+| SQL/pgTAP + integration (bare PostgreSQL) | pgTAP — 183/183, integration — 50/50 |
+| `supabase start` + `supabase db reset --local` + `supabase test db` | success |
+| Playwright E2E (12 сценариев, реальный локальный Supabase Auth в CI) | 12 passed, 0 failed, 0 skipped |
+| GitHub Actions run | CI #5 — все 4 обязательные job success |
+| Миграции этапа 4 на удалённой (remote) Supabase-базе | применены; local и remote migrations совпадают |
+| Preview Deployment | проверен вручную: вход администратора, услуги, расписание, блокировки, настройки и записи работают |
 
-Статус этапа выше остаётся "реализован, ожидает CI/E2E", пока эта таблица
-не будет заполнена реальными числами из фактически завершившегося
-прогона GitHub Actions.
+Статус этапа выше — "готово": все 4 обязательные CI job (lint/typecheck/
+unit/build, SQL+integration, `supabase db reset`+pgTAP, Playwright E2E)
+прошли зелёными без единого пропущенного или упавшего теста, миграции
+подтверждены на удалённой базе, а панель проверена вручную на Preview
+Deployment.
 
 ## Локальный запуск
 
@@ -1441,9 +1445,9 @@ Telegram-бот".
    (`get_available_slots`, `reserve_appointment`, `cancel_appointment_by_client`).~~
    Готово.
 3. ~~Telegram-бот и клиентский сценарий записи.~~ Готово.
-4. Авторизация и административная панель — код реализован, ожидает
-   зелёного прогона CI/E2E (см. "Результаты проверки" в разделе "Этап 4"
-   выше) перед тем, как считаться готовым.
+4. ~~Авторизация и административная панель~~ Готово (CI #5 зелёный, миграции
+   применены к удалённой базе, Preview Deployment проверен вручную — см.
+   "Результаты проверки" в разделе "Этап 4" выше).
 5. Напоминания.
 6. Полное тестирование (unit, SQL, integration, Playwright) — базовый набор
    для Этапа 4 добавлен; продолжится на следующих этапах по мере роста
