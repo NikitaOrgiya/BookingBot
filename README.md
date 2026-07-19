@@ -150,8 +150,23 @@ Deployment проверен вручную (вход администратор�
 Подробности — в разделе "Этап 4: авторизация и административная панель"
 ниже.
 
-**Этап 5: автоматические Telegram-напоминания** — Stage 5 implemented,
-awaiting Preview verification and production activation.
+**Этап 5: автоматические Telegram-напоминания** — implemented and manually
+verified, awaiting merge and production cron activation.
+
+Владелец проекта вручную подтвердил на Preview Deployment: миграции
+`20260719100000_appointment_reminders.sql` и
+`20260719100100_appointment_reminder_functions.sql` применены к удалённой
+(remote) Supabase-базе, local и remote migration history совпадают;
+`GET /api/cron/reminders` на Preview без заголовка `Authorization` отвечает
+`401`, с верным Preview-значением `CRON_SECRET` — `200`; контролируемое
+2ч-напоминание было реально доставлено в Telegram (текст содержал верную
+услугу, дату и время), соответствующая строка `appointment_reminders`
+перешла в `status = 'sent'`, а повторный вызов эндпоинта повторно
+сообщение не отправил (штатная защита от повторной доставки —
+`processing`-lease + переход `processing → sent`, см. "Идемпотентность и
+честный крайний случай" ниже — подтверждена вручную, а не только тестами).
+Supabase Cron **по-прежнему не активирован** — это отдельный,
+не выполненный в рамках этой проверки шаг.
 
 - новая таблица `public.appointment_reminders` — журнал напоминаний '24h'/'2h'
   с processing-lease и учётом попыток. Этап 1 когда-то завёл заготовку
@@ -1442,11 +1457,43 @@ Deployment.
 
 ## Этап 5: автоматические Telegram-напоминания
 
-**Статус: Stage 5 implemented, awaiting Preview verification and
-production activation.** Реализация, миграции и тесты готовы и проходят
-локально и в GitHub Actions CI; production cron **не активирован** —
-это отдельный, явный шаг владельца проекта (см. "Активация в production"
-ниже), не выполняемый автоматически ни этой миграцией, ни CI, ни PR.
+**Статус: implemented and manually verified, awaiting merge and
+production cron activation.** Реализация, миграции и тесты готовы и
+проходят локально и в GitHub Actions CI (все 4 обязательные job зелёные —
+см. "Результаты проверки" ниже); владелец проекта вручную подтвердил
+работу на Preview Deployment (см. следующий раздел). Production cron
+**не активирован** — это отдельный, явный шаг владельца проекта (см.
+"Активация в production" ниже), не выполняемый автоматически ни этой
+миграцией, ни CI, ни PR, ни самой ручной Preview-проверкой.
+
+### Результаты ручной проверки на Preview (владелец проекта)
+
+Выполнено и подтверждено владельцем проекта напрямую на Preview
+Deployment ветки `feat/stage-5-reminders` (агент не имеет доступа к
+реальным Preview-секретам/Telegram и не может воспроизвести эту проверку
+сам — см. "Preview: как проверить эндпоинт" ниже, честно описывающий тот
+же самый ограниченный доступ):
+
+- миграции `20260719100000_appointment_reminders.sql` и
+  `20260719100100_appointment_reminder_functions.sql` применены к
+  удалённой (remote) Supabase-базе; **local и remote migration history
+  совпадают**;
+- `GET /api/cron/reminders` на Preview без заголовка `Authorization`
+  отвечает `401`;
+- тот же эндпоинт с верным Preview-значением `CRON_SECRET` отвечает `200`;
+- создано контролируемое `2h`-напоминание, и оно **реально доставлено**
+  в Telegram настоящим сообщением;
+- текст доставленного сообщения содержал корректные услугу, дату и время;
+- соответствующая строка `appointment_reminders` перешла в
+  `status = 'sent'`;
+- повторный вызов эндпоинта **не отправил второе сообщение** — штатная
+  защита от повторной доставки (переход `processing → sent` в
+  `mark_appointment_reminder_sent`, из которого не запросить повторную
+  claim уже `sent`-строки — см. "Атомарный claim и processing-lease"
+  выше) подтверждена не только тестами, но и вручную на реальном
+  Telegram API;
+- Supabase Cron **по-прежнему не активирован** — ни в рамках этой
+  проверки, ни автоматически.
 
 ### Архитектура: журнал + идемпотентный триггер + атомарный claim + cron
 
@@ -1844,9 +1891,9 @@ Telegram-бот".
 4. ~~Авторизация и административная панель~~ Готово (CI #5 зелёный, миграции
    применены к удалённой базе, Preview Deployment проверен вручную — см.
    "Результаты проверки" в разделе "Этап 4" выше).
-5. ~~Напоминания.~~ Stage 5 implemented, awaiting Preview verification and
-   production activation — см. "Этап 5: автоматические Telegram-напоминания"
-   выше.
+5. ~~Напоминания.~~ Implemented and manually verified, awaiting merge and
+   production cron activation — см. "Этап 5: автоматические
+   Telegram-напоминания" выше.
 6. Полное тестирование (unit, SQL, integration, Playwright) — базовый набор
    для Этапа 4 добавлен; продолжится на следующих этапах по мере роста
    функциональности.
