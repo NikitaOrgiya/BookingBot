@@ -150,23 +150,24 @@ Deployment проверен вручную (вход администратор�
 Подробности — в разделе "Этап 4: авторизация и административная панель"
 ниже.
 
-**Этап 5: автоматические Telegram-напоминания** — implemented and manually
-verified, awaiting merge and production cron activation.
+**Этап 5: автоматические Telegram-напоминания** — готово. PR #5 слит в
+`main` (production-коммит `0a5459e`), Production Deployment работает,
+миграции применены к удалённой (remote) Supabase-базе (local и remote
+migration history совпадают), и **Supabase Cron активирован** —
+`GET /api/cron/reminders` вызывается автоматически каждые 5 минут.
 
-Владелец проекта вручную подтвердил на Preview Deployment: миграции
-`20260719100000_appointment_reminders.sql` и
-`20260719100100_appointment_reminder_functions.sql` применены к удалённой
-(remote) Supabase-базе, local и remote migration history совпадают;
-`GET /api/cron/reminders` на Preview без заголовка `Authorization` отвечает
-`401`, с верным Preview-значением `CRON_SECRET` — `200`; контролируемое
-2ч-напоминание было реально доставлено в Telegram (текст содержал верную
-услугу, дату и время), соответствующая строка `appointment_reminders`
-перешла в `status = 'sent'`, а повторный вызов эндпоинта повторно
-сообщение не отправил (штатная защита от повторной доставки —
-`processing`-lease + переход `processing → sent`, см. "Идемпотентность и
-честный крайний случай" ниже — подтверждена вручную, а не только тестами).
-Supabase Cron **по-прежнему не активирован** — это отдельный,
-не выполненный в рамках этой проверки шаг.
+Владелец проекта подтвердил на production: `GET /api/cron/reminders` без
+заголовка `Authorization` отвечает `401`, с верным production-значением
+`CRON_SECRET` — `200`; контролируемое 2ч-напоминание было реально
+доставлено в Telegram (текст содержал верную услугу, дату и время),
+соответствующая строка `appointment_reminders` перешла в
+`status = 'sent'`, а повторный вызов эндпоинта повторно сообщение не
+отправил (штатная защита от повторной доставки — `processing`-lease +
+переход `processing → sent`, см. "Идемпотентность и честный крайний
+случай" ниже — подтверждена вручную на реальном Telegram API, а не
+только тестами). Автоматический cron job `bookingbot-appointment-reminders`
+(`*/5 * * * *`) успешно выполнил первый расписанный запуск (`succeeded`,
+HTTP `200` от `pg_net`).
 
 - новая таблица `public.appointment_reminders` — журнал напоминаний '24h'/'2h'
   с processing-lease и учётом попыток. Этап 1 когда-то завёл заготовку
@@ -190,12 +191,21 @@ Supabase Cron **по-прежнему не активирован** — это �
   юнит-тестируемая без БД;
 - защищённый `GET /api/cron/reminders` (Bearer `CRON_SECRET`, константное
   по времени сравнение, fail-closed, без PII в логах/ответе);
-- production cron **не активирован** — ops-скрипты (`supabase/ops/`) для
-  Supabase Cron подготовлены, но применяются владельцем вручную, отдельно
-  от этого PR.
+- **production cron активирован** — единственный планировщик проекта,
+  Vercel Cron не настроен (см. "Активация в production" ниже).
 
 Подробности — в разделе "Этап 5: автоматические Telegram-напоминания"
 ниже.
+
+## Текущий production-статус
+
+- Production URL: https://booking-bot-gules.vercel.app
+- Telegram Bot: [@booking_service_nk_bot](https://t.me/booking_service_nk_bot)
+- Admin panel: `/login`
+- Telegram webhook — active
+- Supabase Cron — active
+- Stage 0–5 — completed
+- Текущий production-коммит — `0a5459e`
 
 ## Production
 
@@ -1457,30 +1467,28 @@ Deployment.
 
 ## Этап 5: автоматические Telegram-напоминания
 
-**Статус: implemented and manually verified, awaiting merge and
-production cron activation.** Реализация, миграции и тесты готовы и
-проходят локально и в GitHub Actions CI (все 4 обязательные job зелёные —
-см. "Результаты проверки" ниже); владелец проекта вручную подтвердил
-работу на Preview Deployment (см. следующий раздел). Production cron
-**не активирован** — это отдельный, явный шаг владельца проекта (см.
-"Активация в production" ниже), не выполняемый автоматически ни этой
-миграцией, ни CI, ни PR, ни самой ручной Preview-проверкой.
+**Статус: завершено.** PR #5 слит в `main` (production-коммит `0a5459e`
+"feat: add idempotent Telegram appointment reminders (#5)"), миграции
+применены к удалённой (remote) Supabase-базе (local и remote migration
+history совпадают), Production Deployment работает, и **Supabase Cron
+активирован** — единственный планировщик проекта (Vercel Cron не
+настроен). Все 4 обязательные CI job зелёные (см. "Результаты проверки"
+ниже).
 
-### Результаты ручной проверки на Preview (владелец проекта)
+### Результаты проверки на production (владелец проекта)
 
-Выполнено и подтверждено владельцем проекта напрямую на Preview
-Deployment ветки `feat/stage-5-reminders` (агент не имеет доступа к
-реальным Preview-секретам/Telegram и не может воспроизвести эту проверку
-сам — см. "Preview: как проверить эндпоинт" ниже, честно описывающий тот
-же самый ограниченный доступ):
+Выполнено и подтверждено владельцем проекта напрямую на production после
+merge PR #5 (агент не имеет доступа к production-секретам/Telegram/Vault
+и не может воспроизвести эту проверку сам):
 
 - миграции `20260719100000_appointment_reminders.sql` и
   `20260719100100_appointment_reminder_functions.sql` применены к
   удалённой (remote) Supabase-базе; **local и remote migration history
   совпадают**;
-- `GET /api/cron/reminders` на Preview без заголовка `Authorization`
+- `GET /api/cron/reminders` на production без заголовка `Authorization`
   отвечает `401`;
-- тот же эндпоинт с верным Preview-значением `CRON_SECRET` отвечает `200`;
+- тот же эндпоинт с верным production-значением `CRON_SECRET` отвечает
+  `200`;
 - создано контролируемое `2h`-напоминание, и оно **реально доставлено**
   в Telegram настоящим сообщением;
 - текст доставленного сообщения содержал корректные услугу, дату и время;
@@ -1492,8 +1500,13 @@ Deployment ветки `feat/stage-5-reminders` (агент не имеет до�
   claim уже `sent`-строки — см. "Атомарный claim и processing-lease"
   выше) подтверждена не только тестами, но и вручную на реальном
   Telegram API;
-- Supabase Cron **по-прежнему не активирован** — ни в рамках этой
-  проверки, ни автоматически.
+- **Supabase Cron активирован**: job `bookingbot-appointment-reminders`
+  (`*/5 * * * *`) создан в production Vault-based ops-скриптом (см.
+  "Активация в production" ниже), существует ровно одна такая job,
+  `active = true`, первый расписанный запуск завершился `succeeded`, а
+  соответствующий HTTP-вызов `pg_net` вернул `status_code = 200` без
+  таймаута и без ошибки. Vercel Cron не настроен — Supabase Cron
+  остаётся единственным планировщиком проекта.
 
 ### Архитектура: журнал + идемпотентный триггер + атомарный claim + cron
 
@@ -1506,8 +1519,8 @@ Deployment ветки `feat/stage-5-reminders` (агент не имеет до�
    каждое через уже существующий Telegram-клиент бота, и фиксирует
    исход (`sent`/`failed`/`skipped`) в той же таблице.
 3. Регулярный вызов этого endpoint'а обеспечивает cron-планировщик
-   (Supabase Cron — см. "Выбор планировщика" ниже), который в рамках
-   этого этапа **настроен только скриптом, но не включён**.
+   (Supabase Cron — см. "Выбор планировщика" ниже), который **активирован
+   в production** и вызывает эндпоинт каждые 5 минут.
 
 ### Таблица `public.appointment_reminders` — новая, не переименование
 
@@ -1785,10 +1798,11 @@ Editor:
 
 ### Preview: как проверить эндпоинт, не отправляя реальные напоминания
 
-После деплоя Preview (см. "Активация в production" ниже про переменные
-окружения Preview) проверить `GET /api/cron/reminders`, не создавая
-никаких тестовых записей и не рискуя отправить реальному клиенту
-сообщение:
+Тот же безопасный способ проверки, которым пользовались для Preview
+Deployment ветки `feat/stage-5-reminders` перед merge (и которым можно
+пользоваться для любого будущего Preview-деплоя): проверить
+`GET /api/cron/reminders`, не создавая никаких тестовых записей и не
+рискуя отправить реальному клиенту сообщение:
 
 ```bash
 curl -i "https://<preview-домен>/api/cron/reminders"
@@ -1810,22 +1824,36 @@ production-бота), подождать наступления `scheduled_for`,
 сообщение "Скоро ваша запись". Реальные production-данные/боты в этом
 шаге не участвуют.
 
-### Активация в production (выполняется владельцем, отдельно от этого PR)
+### Активация в production — выполнено
+
+Шаги ниже владелец проекта уже выполнил после merge PR #5; они приведены
+как справка (например, для повторной активации после отключения или
+ротации секретов):
 
 1. Смержить PR Этапа 5 в `main` и дождаться успешного Production
-   Deployment.
+   Deployment. — выполнено (`0a5459e`).
 2. Убедиться, что переменная `CRON_SECRET` задана в production-окружении
-   Vercel (если её там ещё не было).
-3. В Supabase SQL Editor **production**-проекта создать секреты Vault
-   (значения — только там, никогда не в Git/чате):
+   Vercel. — выполнено.
+3. В Supabase SQL Editor **production**-проекта создать/обновить секреты
+   Vault (значения — только там, никогда не в Git/чате):
    ```sql
-   select vault.create_secret('https://<production-домен>/api/cron/reminders', 'reminders_cron_url');
+   select vault.create_secret('https://booking-bot-gules.vercel.app/api/cron/reminders', 'reminders_cron_url');
    select vault.create_secret('<то же значение, что CRON_SECRET в Vercel production>', 'reminders_cron_secret');
    ```
+   — выполнено; подтверждено ровно два секрета с этими именами
+   (`select name from vault.secrets where name in (...)`, без вывода
+   расшифрованных значений).
 4. Выполнить `supabase/ops/setup-reminder-cron.sql` целиком в том же SQL
-   Editor — создаст job `bookingbot-appointment-reminders` (`*/5 * * * *`).
+   Editor — создаёт job `bookingbot-appointment-reminders` (`*/5 * * * *`).
+   — выполнено; создана ровно одна job с этим именем, `active = true`.
 5. Проверить `supabase/ops/check-reminder-cron.sql` — job активен,
-   `cron.job_run_details` показывает `succeeded`.
+   `cron.job_run_details` показывает `succeeded` для первого
+   расписанного запуска, а `net._http_response` — `status_code = 200`,
+   `timed_out = false`, `error_msg = null` для соответствующего вызова.
+   — выполнено.
+
+Vercel Cron при этом не настраивался — в проекте остаётся ровно один
+планировщик (Supabase Cron).
 
 **Откат/отключение:** `supabase/ops/teardown-reminder-cron.sql` снимает
 job немедленно (секреты Vault не удаляет — их можно отозвать отдельно,
@@ -1891,9 +1919,9 @@ Telegram-бот".
 4. ~~Авторизация и административная панель~~ Готово (CI #5 зелёный, миграции
    применены к удалённой базе, Preview Deployment проверен вручную — см.
    "Результаты проверки" в разделе "Этап 4" выше).
-5. ~~Напоминания.~~ Implemented and manually verified, awaiting merge and
-   production cron activation — см. "Этап 5: автоматические
-   Telegram-напоминания" выше.
+5. ~~Напоминания.~~ Готово (PR #5 слит, production-коммит `0a5459e`,
+   миграции применены к удалённой базе, Supabase Cron активирован — см.
+   "Этап 5: автоматические Telegram-напоминания" выше).
 6. Полное тестирование (unit, SQL, integration, Playwright) — базовый набор
    для Этапа 4 добавлен; продолжится на следующих этапах по мере роста
    функциональности.
@@ -1905,3 +1933,13 @@ Telegram-бот".
 8. Финальное портфолио-оформление.
 
 Подробности каждого этапа — в техническом задании проекта.
+
+## Portfolio
+
+Материалы для презентации проекта как коммерческого решения:
+
+- [docs/portfolio/BOOKINGBOT_CASE_STUDY.md](docs/portfolio/BOOKINGBOT_CASE_STUDY.md) — кейс-стади: задача, решение, стек, архитектура, сложные технические задачи, тесты, ограничения.
+- [docs/portfolio/DEMO_SCRIPT.md](docs/portfolio/DEMO_SCRIPT.md) — сценарий демонстрации на 3–5 минут.
+- [docs/portfolio/SCREENSHOT_CHECKLIST.md](docs/portfolio/SCREENSHOT_CHECKLIST.md) — список необходимых скриншотов.
+- [docs/portfolio/FREELANCE_OFFER.md](docs/portfolio/FREELANCE_OFFER.md) — предложение для заказчика и пример отклика.
+- [docs/portfolio/CLIENT_DEPLOYMENT_CHECKLIST.md](docs/portfolio/CLIENT_DEPLOYMENT_CHECKLIST.md) — чеклист развёртывания под нового клиента.
