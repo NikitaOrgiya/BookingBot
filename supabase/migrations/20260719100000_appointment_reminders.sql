@@ -99,7 +99,17 @@ create trigger set_updated_at
 alter table public.appointment_reminders enable row level security;
 alter table public.appointment_reminders force row level security;
 
-revoke all on table public.appointment_reminders from anon, authenticated;
+-- REVOKE ALL FROM service_role (не только anon/authenticated) обязателен
+-- даже для новой таблицы: на настоящем Supabase-стеке (не на bare
+-- PostgreSQL locally, где service_role создаётся "с нуля" пустым) у
+-- service_role по умолчанию, ещё до наших миграций, уже есть широкие
+-- привилегии на все таблицы схемы public, включая REFERENCES/TRIGGER/
+-- TRUNCATE — та же причина, по которой Этапу 4 понадобилась отдельная
+-- корректирующая миграция 20260718110000_service_role_least_privilege.sql
+-- для восьми УЖЕ существовавших на тот момент таблиц. Эта таблица создана
+-- позже той корректирующей миграции, поэтому получает тот же явный
+-- REVOKE ALL сразу здесь, а не отдельным будущим исправлением.
+revoke all on table public.appointment_reminders from anon, authenticated, service_role;
 
 -- Те же привилегии, что и у notification_deliveries (Этап 1): администратор
 -- только просматривает журнал напоминаний, cron-обработчик (service_role)
