@@ -3,10 +3,9 @@ const READY_FEATURES = [
   "Показ только реально свободных слотов",
   "Защита от двойного бронирования на уровне PostgreSQL",
   "Отмена записи клиентом в разрешённый срок",
+  "Автоматические напоминания клиенту перед визитом",
   "Административная панель: записи, услуги, расписание, настройки",
 ];
-
-const PLANNED_FEATURES = ["Автоматические напоминания клиентам перед визитом"];
 
 const STACK = [
   "Next.js",
@@ -76,22 +75,6 @@ export default function Home() {
 
         <section className="flex flex-col gap-4">
           <h2 className="text-xl font-semibold text-zinc-950 dark:text-zinc-50">
-            В разработке
-          </h2>
-          <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {PLANNED_FEATURES.map((feature) => (
-              <li
-                key={feature}
-                className="rounded-lg border border-dashed border-zinc-300 p-4 text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-500"
-              >
-                {feature}
-              </li>
-            ))}
-          </ul>
-        </section>
-
-        <section className="flex flex-col gap-4">
-          <h2 className="text-xl font-semibold text-zinc-950 dark:text-zinc-50">
             Технологический стек
           </h2>
           <ul className="flex flex-wrap gap-2">
@@ -107,7 +90,7 @@ export default function Home() {
         </section>
 
         <footer className="mt-auto flex flex-col gap-2 border-t border-zinc-200 pt-6 text-sm text-zinc-500 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800 dark:text-zinc-500">
-          <p>Портфолио-проект. Часть возможностей ещё в разработке.</p>
+          <p>Демонстрационный проект: запись, напоминания и панель работают.</p>
           <a
             href="https://github.com/nikitaorgiya/bookingbot"
             target="_blank"
